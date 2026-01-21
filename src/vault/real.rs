@@ -15,6 +15,7 @@ use rsa::{Oaep, Pkcs1v15Encrypt, RsaPrivateKey};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::collections::HashMap;
+#[cfg(feature = "debug")]
 use std::path::PathBuf;
 use uuid::Uuid;
 
@@ -51,6 +52,7 @@ struct CollectionResponse {
     #[serde(flatten)]
     _other: HashMap<String, serde_json::Value>,
 }
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SyncCache {
@@ -112,18 +114,24 @@ pub struct RealVaultApi {
 }
 
 impl RealVaultApi {
+    #[cfg(feature = "debug")]
     const CACHE_FILE: &'static str = ".ssh-vaultvarden-sync.json";
 
+    #[cfg(feature = "debug")]
     fn cache_path() -> PathBuf {
         std::env::current_dir()
             .unwrap_or_else(|_| PathBuf::from("."))
             .join(Self::CACHE_FILE)
     }
 
+    #[cfg(feature = "debug")]
     fn cache_exists() -> bool {
         Self::cache_path().is_file()
     }
 
+
+
+    #[cfg(feature = "debug")]
     fn load_cache() -> Result<Option<SyncCache>> {
         let path = Self::cache_path();
         if !path.is_file() {
@@ -136,12 +144,23 @@ impl RealVaultApi {
         Ok(Some(cache))
     }
 
+    #[cfg(not(feature = "debug"))]
+    fn load_cache() -> Result<Option<SyncCache>> {
+        Ok(None)
+    }
+
+    #[cfg(feature = "debug")]
     fn save_cache(cache: &SyncCache) -> Result<()> {
         let path = Self::cache_path();
         let content = serde_json::to_string_pretty(cache)
             .map_err(|e| Error::Vault(format!("Failed to serialize cache: {}", e)))?;
         std::fs::write(&path, content)
             .map_err(|e| Error::Vault(format!("Failed to write cache file: {}", e)))?;
+        Ok(())
+    }
+
+    #[cfg(not(feature = "debug"))]
+    fn save_cache(_cache: &SyncCache) -> Result<()> {
         Ok(())
     }
     pub fn new(config: Config) -> Self {
@@ -736,22 +755,25 @@ impl RealVaultApi {
     }
 
     fn get_ciphers(&mut self) -> Result<Vec<CipherResponse>> {
-        // Check cache first - if it exists and looks decrypted, use it
-        if let Some(cache) = Self::load_cache()? {
-            // Check if cached ciphers look decrypted (don't start with encryption type number)
-            let looks_decrypted = cache.ciphers.iter().take(10).all(|c| {
-                !c.name
-                    .chars()
-                    .next()
-                    .map_or(false, |ch| ch.is_ascii_digit() && c.name.contains('.'))
-            });
+        #[cfg(feature = "debug")]
+        {
+            // Check cache first - if it exists and looks decrypted, use it
+            if let Some(cache) = Self::load_cache()? {
+                // Check if cached ciphers look decrypted (don't start with encryption type number)
+                let looks_decrypted = cache.ciphers.iter().take(10).all(|c| {
+                    !c.name
+                        .chars()
+                        .next()
+                        .map_or(false, |ch| ch.is_ascii_digit() && c.name.contains('.'))
+                });
 
-            if looks_decrypted && !cache.ciphers.is_empty() {
-                debug!("Using {} decrypted ciphers from cache", cache.ciphers.len());
-                self.collections_cache = cache.collections;
-                return Ok(cache.ciphers);
-            } else {
-                debug!("Cache exists but ciphers appear encrypted, fetching fresh data");
+                if looks_decrypted && !cache.ciphers.is_empty() {
+                    debug!("Using {} decrypted ciphers from cache", cache.ciphers.len());
+                    self.collections_cache = cache.collections;
+                    return Ok(cache.ciphers);
+                } else {
+                    debug!("Cache exists but ciphers appear encrypted, fetching fresh data");
+                }
             }
         }
 
@@ -972,10 +994,13 @@ impl RealVaultApi {
             debug!("Cipher name: {}", cipher.name);
         }
 
-        Self::save_cache(&SyncCache {
-            ciphers: decrypted_ciphers.clone(),
-            collections: self.collections_cache.clone(),
-        })?;
+        #[cfg(feature = "debug")]
+        {
+            Self::save_cache(&SyncCache {
+                ciphers: decrypted_ciphers.clone(),
+                collections: self.collections_cache.clone(),
+            })?;
+        }
 
         Ok(decrypted_ciphers)
     }
@@ -1062,19 +1087,37 @@ impl RealVaultApi {
             .cloned()
             .unwrap_or_default();
 
-        if let Some(captures) = ssh_pattern.captures(&cipher.name) {
-            let user = captures.get(1).unwrap().as_str();
-            let host = captures.get(2).unwrap().as_str();
-            debug!(
-                "Matched SSH entry from '{}': {}@{} (cipher: {})",
-                &cipher.name, user, host, cipher.id
-            );
-            return Some(SshEntry {
-                user: user.to_string(),
-                ip: host.to_string(),
-                password: password.clone(),
-                notes: cipher.notes.clone(),
-            });
+        // Try name first, then notes, then URI(s).
+        let mut candidates: Vec<(&str, &str)> = Vec::new();
+        candidates.push(("name", cipher.name.as_str()));
+        if let Some(ref notes) = cipher.notes {
+            candidates.push(("notes", notes.as_str()));
+        }
+        if let Some(ref login) = cipher.login {
+            if let Some(ref uris) = login.uris {
+                for uri in uris {
+                    if let Some(ref uri_value) = uri.uri {
+                        candidates.push(("uri", uri_value.as_str()));
+                    }
+                }
+            }
+        }
+
+        for (source, text) in candidates {
+            if let Some(captures) = ssh_pattern.captures(text) {
+                let user = captures.get(1).unwrap().as_str();
+                let host = captures.get(2).unwrap().as_str();
+                debug!(
+                    "Matched SSH entry from {} '{}': {}@{} (cipher: {})",
+                    source, text, user, host, cipher.id
+                );
+                return Some(SshEntry {
+                    user: user.to_string(),
+                    ip: host.to_string(),
+                    password: password.clone(),
+                    notes: cipher.notes.clone(),
+                });
+            }
         }
 
         None
@@ -1114,11 +1157,22 @@ impl VaultApi for RealVaultApi {
     }
 
     fn search(&mut self, pattern: &str) -> Result<Vec<SshEntry>> {
-        // Ensure we're authenticated unless cache exists
-        if self.access_token.is_none() && !Self::cache_exists() {
-            return Err(Error::Vault(
-                "Not authenticated. Call authenticate() first.".to_string(),
-            ));
+        // Ensure we're authenticated unless debug-cache exists (debug feature only).
+        if self.access_token.is_none() {
+            #[cfg(feature = "debug")]
+            {
+                if !Self::cache_exists() {
+                    return Err(Error::Vault(
+                        "Not authenticated. Call authenticate() first.".to_string(),
+                    ));
+                }
+            }
+            #[cfg(not(feature = "debug"))]
+            {
+                return Err(Error::Vault(
+                    "Not authenticated. Call authenticate() first.".to_string(),
+                ));
+            }
         }
 
         let ciphers = self.get_ciphers()?;

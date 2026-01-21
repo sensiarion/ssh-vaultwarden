@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::store::{file::FileStore, Store};
+use crate::store::{store_from_env, Store};
 use crate::vault::{mock::MockVaultApi, real::RealVaultApi, VaultApi};
 use crate::Result;
 use clap::{Parser, Subcommand};
@@ -72,7 +72,7 @@ impl App {
             }
         };
 
-        let store = Box::new(FileStore::default()?);
+        let store = store_from_env()?;
         Ok(Self { vault, store })
     }
 
@@ -407,7 +407,17 @@ impl App {
     fn handle_sync(&self) -> Result<()> {
         let config = Config::load()?;
 
-        let cache_exists = std::path::Path::new(".ssh-vaultvarden-sync.json").is_file();
+        let cache_exists = {
+            #[cfg(feature = "debug")]
+            {
+                std::path::Path::new(".ssh-vaultvarden-sync.json").is_file()
+            }
+            #[cfg(not(feature = "debug"))]
+            {
+                false
+            }
+        };
+        #[cfg(feature = "debug")]
         if cache_exists {
             println!("Using cached vault data from .ssh-vaultvarden-sync.json");
         }
@@ -554,6 +564,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::file::FileStore;
     use tempfile::TempDir;
 
     #[test]

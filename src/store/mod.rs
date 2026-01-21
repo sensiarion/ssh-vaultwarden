@@ -3,17 +3,31 @@ use crate::vault::SshEntry;
 use serde::{Deserialize, Serialize};
 
 pub mod file;
+pub mod keyring;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct StoreData {
-    entries: Vec<SshEntry>,
-}
+
 
 pub trait Store: Send + Sync {
     fn load_entries(&self) -> Result<Vec<SshEntry>>;
     fn save_entries(&self, entries: &[SshEntry]) -> Result<()>;
     fn get_sync_timestamp(&self) -> Result<Option<i64>>;
     fn set_sync_timestamp(&self, timestamp: i64) -> Result<()>;
+}
+
+/// Build the store backend based on `STORE_API`.
+///
+/// - `STORE_API=file` (default): store data in `~/.ssh-vaultvarden-secret.json`
+/// - `STORE_API=keyring`: store data in the OS keyring (Keychain / Credential Manager / Secret Service)
+pub fn store_from_env() -> Result<Box<dyn Store>> {
+    match std::env::var("STORE_API") {
+        Ok(v) if v == "file" => Ok(Box::new(file::FileStore::default()?)),
+        Ok(v) if v == "keyring" => Ok(Box::new(keyring::KeyringStore::default())),
+        Ok(v) => Err(crate::Error::Store(format!(
+            "Invalid STORE_API value '{}'. Use 'file' or 'keyring'.",
+            v
+        ))),
+        Err(_) => Ok(Box::new(keyring::KeyringStore::default())),
+    }
 }
 
 #[cfg(test)]

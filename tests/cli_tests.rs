@@ -1,6 +1,5 @@
 use assert_cmd::Command;
 use tempfile::TempDir;
-use std::env;
 use std::fs;
 
 #[test]
@@ -8,11 +7,9 @@ fn test_init_command() {
     let temp_dir = TempDir::new().unwrap();
     let config_path = temp_dir.path().join(".ssh-vaultvarden.toml");
     
-    // Set HOME to temp directory
-    env::set_var("HOME", temp_dir.path().to_str().unwrap());
-    
     let mut cmd = Command::cargo_bin("ssh-vaultvarden").unwrap();
     cmd.arg("init").arg("--non-interactive");
+    cmd.env("HOME", temp_dir.path().to_str().unwrap());
     // Provide input: vault URL and skip email
     cmd.write_stdin("https://test.example.com\n\n");
     cmd.assert().success();
@@ -34,10 +31,9 @@ fn test_init_command_existing_config() {
     // Create existing config
     fs::write(&config_path, "vault_url = \"https://existing.com\"\n").unwrap();
     
-    env::set_var("HOME", temp_dir.path().to_str().unwrap());
-    
     let mut cmd = Command::cargo_bin("ssh-vaultvarden").unwrap();
     cmd.arg("init");
+    cmd.env("HOME", temp_dir.path().to_str().unwrap());
     let output = cmd.assert().success();
     
     // Should report that config exists
@@ -53,10 +49,9 @@ fn test_init_command_overwrite() {
     // Create existing config
     fs::write(&config_path, "vault_url = \"https://old.com\"\nlogin = \"old@example.com\"\n").unwrap();
     
-    env::set_var("HOME", temp_dir.path().to_str().unwrap());
-    
     let mut cmd = Command::cargo_bin("ssh-vaultvarden").unwrap();
     cmd.arg("init").arg("--overwrite").arg("--non-interactive");
+    cmd.env("HOME", temp_dir.path().to_str().unwrap());
     // Provide new input
     cmd.write_stdin("https://new.example.com\nnewuser@example.com\n");
     cmd.assert().success();
@@ -77,28 +72,26 @@ fn test_search_command() {
     // Create config
     fs::write(&config_path, "vault_url = \"https://test.com\"\n").unwrap();
     
-    env::set_var("HOME", temp_dir.path().to_str().unwrap());
+    // Pre-populate store with entries
+    let store_data = r#"{
+  "entries": [
+    {
+      "user": "admin",
+      "ip": "192.168.1.1",
+      "password": "admin123"
+    }
+  ]
+}"#;
+    fs::write(&store_path, store_data).unwrap();
     
     let mut cmd = Command::cargo_bin("ssh-vaultvarden").unwrap();
     cmd.arg("search").arg("admin");
     cmd.env("HOME", temp_dir.path().to_str().unwrap());
     let output = cmd.assert().success();
     
-    // Should fetch from vault and find admin entry
+    // Should find admin entry from store
     let stdout = String::from_utf8(output.get_output().stdout.clone()).unwrap();
-    assert!(stdout.contains("admin") || stdout.contains("Found") || stdout.contains("Fetched"));
-    
-    // Store should be created (check via output or file existence)
-    // Note: dirs::home_dir() should respect HOME env var
-    if store_path.exists() {
-        // Verify store has content
-        let content = fs::read_to_string(&store_path).unwrap();
-        assert!(content.contains("admin"));
-    } else {
-        // If file doesn't exist at expected path, at least verify the command succeeded
-        // and output indicates fetching happened
-        assert!(stdout.contains("Fetched") || stdout.contains("Found"));
-    }
+    assert!(stdout.contains("admin") || stdout.contains("Found"));
 }
 
 #[test]
@@ -122,10 +115,9 @@ fn test_search_command_no_matches() {
 }"#;
     fs::write(&store_path, store_data).unwrap();
     
-    env::set_var("HOME", temp_dir.path().to_str().unwrap());
-    
     let mut cmd = Command::cargo_bin("ssh-vaultvarden").unwrap();
     cmd.arg("search").arg("nonexistent");
+    cmd.env("HOME", temp_dir.path().to_str().unwrap());
     let output = cmd.assert().success();
     
     // Should report no matches
@@ -141,15 +133,14 @@ fn test_connect_command_no_matches() {
     // Create config
     fs::write(&config_path, "vault_url = \"https://test.com\"\n").unwrap();
     
-    env::set_var("HOME", temp_dir.path().to_str().unwrap());
-    
     let mut cmd = Command::cargo_bin("ssh-vaultvarden").unwrap();
     cmd.arg("connect").arg("nonexistent");
+    cmd.env("HOME", temp_dir.path().to_str().unwrap());
     let output = cmd.assert().success();
     
-    // Should report no matches
+    // With an empty store, should report that store is empty
     let stdout = String::from_utf8(output.get_output().stdout.clone()).unwrap();
-    assert!(stdout.contains("No entries found"));
+    assert!(stdout.contains("Store is empty"));
 }
 
 #[test]
@@ -173,11 +164,10 @@ fn test_connect_command_short_flag() {
 }"#;
     fs::write(&store_path, store_data).unwrap();
     
-    env::set_var("HOME", temp_dir.path().to_str().unwrap());
-    
     // Test -c short flag
     let mut cmd = Command::cargo_bin("ssh-vaultvarden").unwrap();
     cmd.arg("-c").arg("admin");
+    cmd.env("HOME", temp_dir.path().to_str().unwrap());
     // The command will try to execute SSH which will fail, but that's okay
     // We just want to verify it finds the entry and copies password
     let output = cmd.assert();

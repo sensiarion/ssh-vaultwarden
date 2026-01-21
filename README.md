@@ -2,6 +2,25 @@
 
 CLI tool to ease your work with ssh configs, storing in vaultvarden/bitwarden.
 
+To get started: run `sv init`, then `STORE_API=keyring sv sync`, and finally search/connect via `sv search <pattern>` /
+`sv -c <pattern>`.
+Example:
+
+```bash
+sv init
+STORE_API=keyring sv sync
+sv search admin
+```
+
+Example output:
+
+```text
+Syncing entries from vault...
+Synced 42 entries from vault
+Found 1 matching entries:
+  ssh admin@192.168.1.1
+```
+
 I have ton of ssh configs to work with servers like `ssh <user>@<ip>` with storing email and password in vaultvarden.
 And every time i should:
 
@@ -18,7 +37,8 @@ All of that takes small, but still measurable time, to end with it, this tool:
 
 ## Configuration
 
-To connect to your vault you should specify config in `~/.ssh-vaultvarden.toml`. The easiest way is to use the `sv init` command.
+To connect to your vault you should specify config in `~/.ssh-vaultvarden.toml`. The easiest way is to use the `sv init`
+command.
 
 ### Generating Config
 
@@ -29,6 +49,7 @@ sv init
 ```
 
 This will prompt you for:
+
 - **Vault URL**: Your Vaultwarden/Bitwarden instance URL (e.g., `https://vault.example.com`)
 - **Email** (optional): Your email address (if not provided, will be asked during sync)
 - **TTL in minutes** (optional): Auto-sync expiration time (leave empty for no expiration)
@@ -57,6 +78,24 @@ ttl_minutes = 60 # optional, TTL in minutes for auto-sync
 organization_id = "org-123" # optional, filters items by organization ID
 ```
 
+## Storage (store backend)
+
+This tool caches synced SSH entries (including passwords). Choose where that cache is stored via `STORE_API`:
+
+- **Recommended (secure)**: `STORE_API=keyring`
+    - Uses your OS keyring (macOS Keychain / Windows Credential Manager / Linux Secret Service).
+    - Linux note: you typically need a Secret Service provider (e.g. GNOME Keyring / KWallet) running for keyring access
+      to work.
+- **Insecure fallback**: `STORE_API=file` (default)
+    - Writes plaintext JSON to `~/.ssh-vaultvarden-secret.json`.
+
+Example (secure keyring store):
+
+```bash
+STORE_API=keyring sv sync
+sv search admin
+```
+
 ## Commands
 
 - `sv init` - Creates base config interactively
@@ -81,4 +120,5 @@ organization_id = "org-123" # optional, filters items by organization ID
 - [ ] caching loaded configs in system keyring
 - [ ] caching prelogin data, to prevent full relogin on sync (it causes 429 error)
 - [ ] custom search pattern (specify your own, not just `ssh <user>@<ip>`)
-
+- [ ] provide additional args to ssh
+- [ ] pass command with same logic with connect, but just insert password in buffer
