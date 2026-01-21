@@ -34,6 +34,7 @@ struct CipherResponse {
     #[serde(rename = "type")]
     cipher_type: u8,
     name: String,
+    key: Option<String>,
     notes: Option<String>,
     login: Option<LoginData>,
     collection_ids: Option<Vec<String>>,
@@ -932,10 +933,12 @@ impl RealVaultApi {
         // Decrypt ciphers - handle both personal and organization items
         let mut decrypted_ciphers = Vec::new();
         let mut skipped_count = 0;
+        let mut personal_decryption_failed = false;
+        let mut warned_personal_failure = false;
 
-        for mut cipher in ciphers {
+        'cipher_loop: for mut cipher in ciphers {
             // Determine which key to use for decryption
-            let decryption_key = if let Some(ref org_id) = cipher.organization_id {
+            let base_key = if let Some(ref org_id) = cipher.organization_id {
                 // Organization item - use org key
                 if let Some(org_key) = self.org_keys.get(org_id) {
                     debug!(
@@ -952,28 +955,154 @@ impl RealVaultApi {
                     continue;
                 }
             } else {
-                // Personal item - use user key
+                // Personal item - use user key, but allow fallback if decryption fails
+                if personal_decryption_failed {
+                    skipped_count += 1;
+                    continue;
+                }
                 debug!("Decrypting personal cipher: {}", cipher.id);
                 self.user_key.as_ref().unwrap()
             };
 
-            let decrypted_name = self.decrypt_string_with_key(&cipher.name, decryption_key)?;
+            let mut cipher_key: Option<SymmetricKey> = None;
+            if let Some(ref cipher_key_enc) = cipher.key {
+                match Self::decrypt_enc_string(cipher_key_enc, base_key)
+                    .and_then(|bytes| Self::decode_key_bytes(&bytes))
+                {
+                    Ok(key_bytes) => {
+                        if key_bytes.len() == 64 {
+                            cipher_key = Some(SymmetricKey {
+                                enc_key: key_bytes[..32].to_vec(),
+                                mac_key: key_bytes[32..].to_vec(),
+                            });
+                        } else {
+                            return Err(Error::Vault(format!(
+                                "Invalid cipher key length: expected 64 bytes, got {}",
+                                key_bytes.len()
+                            )));
+                        }
+                    }
+                    Err(err) => {
+                        if cipher.organization_id.is_none() {
+                            personal_decryption_failed = true;
+                            skipped_count += 1;
+                            if !warned_personal_failure {
+                                eprintln!(
+                                    "Warning: failed to decrypt personal items ({}). Continuing with organization items only.",
+                                    err
+                                );
+                                warned_personal_failure = true;
+                            }
+                            continue 'cipher_loop;
+                        }
+                        return Err(err);
+                    }
+                }
+            }
+
+            let decryption_key = cipher_key.as_ref().unwrap_or(base_key);
+
+            let decrypted_name = match self.decrypt_string_with_key(&cipher.name, decryption_key) {
+                Ok(name) => name,
+                Err(err) => {
+                    if cipher.organization_id.is_none() {
+                        personal_decryption_failed = true;
+                        skipped_count += 1;
+                        if !warned_personal_failure {
+                            eprintln!(
+                                "Warning: failed to decrypt personal items ({}). Continuing with organization items only.",
+                                err
+                            );
+                            warned_personal_failure = true;
+                        }
+                        continue 'cipher_loop;
+                    }
+                    return Err(err);
+                }
+            };
             cipher.name = decrypted_name;
             if let Some(ref notes) = cipher.notes {
-                cipher.notes = Some(self.decrypt_string_with_key(notes, decryption_key)?);
+                match self.decrypt_string_with_key(notes, decryption_key) {
+                    Ok(value) => cipher.notes = Some(value),
+                    Err(err) => {
+                        if cipher.organization_id.is_none() {
+                            personal_decryption_failed = true;
+                            skipped_count += 1;
+                            if !warned_personal_failure {
+                                eprintln!(
+                                    "Warning: failed to decrypt personal items ({}). Continuing with organization items only.",
+                                    err
+                                );
+                                warned_personal_failure = true;
+                            }
+                            continue 'cipher_loop;
+                        }
+                        return Err(err);
+                    }
+                }
             }
             if let Some(ref mut login) = cipher.login {
                 if let Some(ref username) = login.username {
-                    login.username = Some(self.decrypt_string_with_key(username, decryption_key)?);
+                    match self.decrypt_string_with_key(username, decryption_key) {
+                        Ok(value) => login.username = Some(value),
+                        Err(err) => {
+                            if cipher.organization_id.is_none() {
+                                personal_decryption_failed = true;
+                                skipped_count += 1;
+                                if !warned_personal_failure {
+                                    eprintln!(
+                                        "Warning: failed to decrypt personal items ({}). Continuing with organization items only.",
+                                        err
+                                    );
+                                    warned_personal_failure = true;
+                                }
+                                continue 'cipher_loop;
+                            }
+                            return Err(err);
+                        }
+                    }
                 }
                 if let Some(ref password) = login.password {
-                    login.password = Some(self.decrypt_string_with_key(password, decryption_key)?);
+                    match self.decrypt_string_with_key(password, decryption_key) {
+                        Ok(value) => login.password = Some(value),
+                        Err(err) => {
+                            if cipher.organization_id.is_none() {
+                                personal_decryption_failed = true;
+                                skipped_count += 1;
+                                if !warned_personal_failure {
+                                    eprintln!(
+                                        "Warning: failed to decrypt personal items ({}). Continuing with organization items only.",
+                                        err
+                                    );
+                                    warned_personal_failure = true;
+                                }
+                                continue 'cipher_loop;
+                            }
+                            return Err(err);
+                        }
+                    }
                 }
                 if let Some(ref mut uris) = login.uris {
                     for uri in uris {
                         if let Some(ref uri_value) = uri.uri {
-                            uri.uri =
-                                Some(self.decrypt_string_with_key(uri_value, decryption_key)?);
+                            match self.decrypt_string_with_key(uri_value, decryption_key) {
+                                Ok(value) => uri.uri = Some(value),
+                                Err(err) => {
+                                    if cipher.organization_id.is_none() {
+                                        personal_decryption_failed = true;
+                                        skipped_count += 1;
+                                        if !warned_personal_failure {
+                                            eprintln!(
+                                                "Warning: failed to decrypt personal items ({}). Continuing with organization items only.",
+                                                err
+                                            );
+                                            warned_personal_failure = true;
+                                        }
+                                        continue 'cipher_loop;
+                                    }
+                                    return Err(err);
+                                }
+                            }
                         }
                     }
                 }
@@ -982,7 +1111,7 @@ impl RealVaultApi {
         }
 
         debug!(
-            "Decrypted {} ciphers, skipped {} (no key available)",
+            "Decrypted {} ciphers, skipped {} (no key or decryption failure)",
             decrypted_ciphers.len(),
             skipped_count
         );
@@ -1237,6 +1366,7 @@ mod tests {
             id: "1".to_string(),
             cipher_type: 1,
             name: "ssh root@10.0.0.1".to_string(),
+            key: None,
             notes: None,
             login: Some(LoginData {
                 username: Some("root".to_string()),
@@ -1262,6 +1392,7 @@ mod tests {
             id: "1b".to_string(),
             cipher_type: 1,
             name: "sshuser@192.168.213.7".to_string(),
+            key: None,
             notes: None,
             login: Some(LoginData {
                 username: Some("user".to_string()),
@@ -1287,6 +1418,7 @@ mod tests {
             id: "1c".to_string(),
             cipher_type: 1,
             name: "ssh  user@192.168.213.7".to_string(),
+            key: None,
             notes: None,
             login: Some(LoginData {
                 username: Some("user".to_string()),
@@ -1311,6 +1443,7 @@ mod tests {
             id: "2".to_string(),
             cipher_type: 1,
             name: "Server".to_string(),
+            key: None,
             notes: Some("ssh deploy@172.16.0.2".to_string()),
             login: Some(LoginData {
                 username: Some("deploy".to_string()),
@@ -1335,6 +1468,7 @@ mod tests {
             id: "3".to_string(),
             cipher_type: 1,
             name: "Server".to_string(),
+            key: None,
             notes: None,
             login: Some(LoginData {
                 username: None,
@@ -1362,6 +1496,7 @@ mod tests {
             id: "4".to_string(),
             cipher_type: 1,
             name: "Regular Website".to_string(),
+            key: None,
             notes: Some("Just a regular website login".to_string()),
             login: Some(LoginData {
                 username: Some("user".to_string()),
@@ -1387,6 +1522,7 @@ mod tests {
             id: "5".to_string(),
             cipher_type: 1,
             name: "ssh root@10.0.0.1".to_string(),
+            key: None,
             notes: Some("ssh other@192.168.1.1".to_string()),
             login: Some(LoginData {
                 username: Some("root".to_string()),
@@ -1413,6 +1549,7 @@ mod tests {
                 id: "1".to_string(),
                 cipher_type: 1,
                 name: "ssh admin@192.168.1.1".to_string(),
+                key: None,
                 notes: None,
                 login: Some(LoginData {
                     username: Some("admin".to_string()),
@@ -1427,6 +1564,7 @@ mod tests {
                 id: "2".to_string(),
                 cipher_type: 1,
                 name: "ssh  user@192.168.213.7".to_string(), // Multiple spaces
+                key: None,
                 notes: None,
                 login: Some(LoginData {
                     username: Some("user".to_string()),
@@ -1441,6 +1579,7 @@ mod tests {
                 id: "3".to_string(),
                 cipher_type: 1,
                 name: "sshuser@10.0.0.1".to_string(), // No space
+                key: None,
                 notes: None,
                 login: Some(LoginData {
                     username: Some("user".to_string()),
@@ -1455,6 +1594,7 @@ mod tests {
                 id: "4".to_string(),
                 cipher_type: 1,
                 name: "Regular Site".to_string(), // Not an SSH entry
+                key: None,
                 notes: None,
                 login: Some(LoginData {
                     username: Some("user".to_string()),

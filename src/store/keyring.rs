@@ -22,6 +22,17 @@ pub struct KeyringStore {
     account: String,
 }
 
+fn keyring_error(context: &str, err: keyring::Error) -> Error {
+    let mut message = format!("{}: {}", context, err);
+    if !cfg!(target_os = "macos") {
+        message.push_str(
+            ". Keyring backend may be unavailable on this platform. \
+Set STORE_API=file or set store_api=\"file\" in the config.",
+        );
+    }
+    Error::Store(message)
+}
+
 impl KeyringStore {
     pub fn new<S: Into<String>, A: Into<String>>(service: S, account: A) -> Self {
         Self {
@@ -34,9 +45,18 @@ impl KeyringStore {
         Self::new(DEFAULT_SERVICE, DEFAULT_ACCOUNT)
     }
 
+    pub fn check_access(&self) -> Result<()> {
+        let entry = self.entry()?;
+        match entry.get_password() {
+            Ok(_) => Ok(()),
+            Err(keyring::Error::NoEntry) => Ok(()),
+            Err(e) => Err(keyring_error("Failed to access keyring", e)),
+        }
+    }
+
     fn entry(&self) -> Result<keyring::Entry> {
         keyring::Entry::new(&self.service, &self.account)
-            .map_err(|e| Error::Store(format!("Failed to initialize keyring entry: {}", e)))
+            .map_err(|e| keyring_error("Failed to initialize keyring entry", e))
     }
 
     fn load_data(&self) -> Result<StoreData> {
@@ -50,7 +70,7 @@ impl KeyringStore {
                 ))),
             },
             Err(keyring::Error::NoEntry) => Ok(StoreData::default()),
-            Err(e) => Err(Error::Store(format!("Failed to read from keyring: {}", e))),
+            Err(e) => Err(keyring_error("Failed to read from keyring", e)),
         }
     }
 
@@ -60,7 +80,7 @@ impl KeyringStore {
             .map_err(|e| Error::Store(format!("Failed to serialize keyring store: {}", e)))?;
         entry
             .set_password(&serialized)
-            .map_err(|e| Error::Store(format!("Failed to write to keyring: {}", e)))?;
+            .map_err(|e| keyring_error("Failed to write to keyring", e))?;
         Ok(())
     }
 }

@@ -32,6 +32,7 @@ pub fn store_from_env() -> Result<Box<dyn Store>> {
         Some("file") => Ok(Box::new(file::FileStore::default()?)),
         Some("keyring") => {
             let store = keyring::KeyringStore::default();
+            store.check_access()?;
             maybe_migrate_from_file_store(&store)?;
             Ok(Box::new(store))
         }
@@ -41,6 +42,13 @@ pub fn store_from_env() -> Result<Box<dyn Store>> {
         ))),
         None => {
             let store = keyring::KeyringStore::default();
+            if let Err(err) = store.check_access() {
+                eprintln!(
+                    "Keyring backend unavailable ({}). Falling back to file store.",
+                    err
+                );
+                return Ok(Box::new(file::FileStore::default()?));
+            }
             maybe_migrate_from_file_store(&store)?;
             Ok(Box::new(store))
         }
