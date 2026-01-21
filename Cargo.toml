@@ -2,10 +2,15 @@
 name = "ssh-vaultvarden"
 version = "0.1.0"
 edition = "2021"
+repository = "https://github.com/sensiarion/ssh-vaultwarden"
 
 [lib]
 name = "ssh_vaultvarden"
 path = "src/lib.rs"
+
+[[bin]]
+name = "sv"
+path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
@@ -50,3 +55,8 @@ keyring = { version = "3.6.3", default-features = false, features = ["linux-nati
 [features]
 # Debug-only features. Not enabled by default.
 debug = []
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

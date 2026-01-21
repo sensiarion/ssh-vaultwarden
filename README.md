@@ -1,9 +1,11 @@
 # SSH Vault
 
-CLI tool to ease your work with ssh configs, storing in vaultvarden/bitwarden.
+`sv` is a small CLI that syncs SSH login entries from Vaultwarden/Bitwarden, lets you search them fast, and helps you connect
+by copying the password to your clipboard.
 
-To get started: run `sv init`, then `STORE_API=keyring sv sync`, and finally search/connect via `sv search <pattern>` /
+To get started: install `sv`, run `sv init`, then `STORE_API=keyring sv sync`, and finally `sv search <pattern>` /
 `sv -c <pattern>` (or copy only the password via `sv pass <pattern>`).
+
 Example:
 
 ```bash
@@ -23,7 +25,7 @@ Found 1 matching entries:
   ssh admin@192.168.1.1
 ```
 
-I have ton of ssh configs to work with servers like `ssh <user>@<ip>` with storing email and password in vaultvarden.
+I have ton of ssh configs to work with servers like `ssh <user>@<ip>` with storing email and password in Vaultwarden.
 And every time i should:
 
 1. find specific config in my storage
@@ -36,6 +38,33 @@ All of that takes small, but still measurable time, to end with it, this tool:
 1. offers completion for your terminal (just type ip or user)
 2. after you suggest, it will execute ssh command in your shell and paste password from vault to your copypaste buffer
 3. That's it. you prepared to work on your server on connect
+
+## Install
+
+Releases are built and published to GitHub with cargo-dist.
+
+- **macOS / Linux (shell installer)**:
+
+```bash
+curl -LsSf https://github.com/sensiarion/ssh-vaultwarden/releases/latest/download/ssh-vaultvarden-installer.sh | sh
+sv --version
+```
+
+- **Windows (PowerShell installer)**:
+
+```powershell
+irm https://github.com/sensiarion/ssh-vaultwarden/releases/latest/download/ssh-vaultvarden-installer.ps1 | iex
+sv --version
+```
+
+- **From source (Rust)**:
+
+```bash
+git clone https://github.com/sensiarion/ssh-vaultwarden.git
+cd ssh-vaultwarden
+cargo install --path .
+sv --version
+```
 
 ## Configuration
 
@@ -113,6 +142,40 @@ sv search admin
     - also can be used as `sv -c` shortcut
 - `sv pass <pattern>` - Copy password of matching SSH entry to clipboard (does not run ssh)
 
+## Developing
+
+If you just want to hack on the code locally:
+
+```bash
+git clone https://github.com/sensiarion/ssh-vaultwarden.git
+cd ssh-vaultwarden
+cargo test
+cargo run -- --help
+```
+
+Useful env vars / flags:
+
+- `STORE_API=keyring|file` to choose where the cache is stored
+- `RUST_LOG=debug` for verbose logs
+- `--features debug` enables reading cached vault data from `.ssh-vaultvarden-sync.json` during `sv sync`
+
+### cargo-dist (packaging / releases)
+
+To validate packaging locally (same config as CI):
+
+```bash
+curl -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.29.0/cargo-dist-installer.sh | sh
+dist plan
+dist build
+```
+
+Releases are produced by pushing a semver tag, for example:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
 ## Features
 
 - [x] config loading from toml
@@ -133,4 +196,4 @@ sv search admin
 - [x] provide additional args to ssh (`--opt`)
 - [ ] fix opt parsing
 - [x] pass command with same logic with connect, but just insert password in buffer
-- [ ] complete readme (with usage and developing blocks, talking about env vars and debug)
+- [x] complete readme (with usage and developing blocks, talking about env vars and debug)

@@ -7,7 +7,7 @@ fn test_init_command() {
     let temp_dir = TempDir::new().unwrap();
     let config_path = temp_dir.path().join(".ssh-vaultvarden.toml");
 
-    let mut cmd = Command::cargo_bin("ssh-vaultvarden").unwrap();
+    let mut cmd = Command::cargo_bin("sv").unwrap();
     cmd.arg("init").arg("--non-interactive");
     cmd.env("HOME", temp_dir.path().to_str().unwrap());
     cmd.env("STORE_API", "file");
@@ -32,7 +32,7 @@ fn test_init_command_existing_config() {
     // Create existing config
     fs::write(&config_path, "vault_url = \"https://existing.com\"\n").unwrap();
 
-    let mut cmd = Command::cargo_bin("ssh-vaultvarden").unwrap();
+    let mut cmd = Command::cargo_bin("sv").unwrap();
     cmd.arg("init");
     cmd.env("HOME", temp_dir.path().to_str().unwrap());
     cmd.env("STORE_API", "file");
@@ -55,7 +55,7 @@ fn test_init_command_overwrite() {
     )
     .unwrap();
 
-    let mut cmd = Command::cargo_bin("ssh-vaultvarden").unwrap();
+    let mut cmd = Command::cargo_bin("sv").unwrap();
     cmd.arg("init").arg("--overwrite").arg("--non-interactive");
     cmd.env("HOME", temp_dir.path().to_str().unwrap());
     cmd.env("STORE_API", "file");
@@ -91,7 +91,7 @@ fn test_search_command() {
 }"#;
     fs::write(&store_path, store_data).unwrap();
 
-    let mut cmd = Command::cargo_bin("ssh-vaultvarden").unwrap();
+    let mut cmd = Command::cargo_bin("sv").unwrap();
     cmd.arg("search").arg("admin");
     cmd.env("HOME", temp_dir.path().to_str().unwrap());
     cmd.env("STORE_API", "file");
@@ -123,7 +123,7 @@ fn test_search_command_no_matches() {
 }"#;
     fs::write(&store_path, store_data).unwrap();
 
-    let mut cmd = Command::cargo_bin("ssh-vaultvarden").unwrap();
+    let mut cmd = Command::cargo_bin("sv").unwrap();
     cmd.arg("search").arg("nonexistent");
     cmd.env("HOME", temp_dir.path().to_str().unwrap());
     cmd.env("STORE_API", "file");
@@ -142,7 +142,7 @@ fn test_connect_command_no_matches() {
     // Create config
     fs::write(&config_path, "vault_url = \"https://test.com\"\n").unwrap();
 
-    let mut cmd = Command::cargo_bin("ssh-vaultvarden").unwrap();
+    let mut cmd = Command::cargo_bin("sv").unwrap();
     cmd.arg("connect").arg("nonexistent");
     cmd.env("HOME", temp_dir.path().to_str().unwrap());
     cmd.env("STORE_API", "file");
@@ -175,7 +175,7 @@ fn test_connect_command_short_flag() {
     fs::write(&store_path, store_data).unwrap();
 
     // Test -c short flag
-    let mut cmd = Command::cargo_bin("ssh-vaultvarden").unwrap();
+    let mut cmd = Command::cargo_bin("sv").unwrap();
     cmd.arg("-c").arg("admin");
     cmd.env("HOME", temp_dir.path().to_str().unwrap());
     cmd.env("STORE_API", "file");
@@ -201,7 +201,7 @@ fn test_pass_command_empty_store() {
     // Create config
     fs::write(&config_path, "vault_url = \"https://test.com\"\n").unwrap();
 
-    let mut cmd = Command::cargo_bin("ssh-vaultvarden").unwrap();
+    let mut cmd = Command::cargo_bin("sv").unwrap();
     cmd.arg("pass").arg("admin");
     cmd.env("HOME", temp_dir.path().to_str().unwrap());
     cmd.env("STORE_API", "file");
