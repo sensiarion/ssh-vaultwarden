@@ -19,3 +19,15 @@ targets = [
     "x86_64-unknown-linux-musl",
     "aarch64-unknown-linux-musl",
 ]
+
+# Use native ARM runners for aarch64 Linux targets (avoid cross-compilation).
+[dist.github-custom-runners]
+aarch64-unknown-linux-gnu = "ubuntu-24.04-arm"
+aarch64-unknown-linux-musl = "ubuntu-24.04-arm"
+aarch64-apple-darwin = "macos-14"
+x86_64-apple-darwin = "macos-14"
+
+# System dependencies needed for Linux x86_64 GNU builds (Secret Service backend uses dbus via pkg-config).
+[dist.dependencies.apt]
+pkg-config = { version = "*", targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"] }
+libdbus-1-dev = { version = "*", targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"] }
