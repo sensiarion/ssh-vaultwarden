@@ -13,6 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[derive(Parser)]
 #[command(name = "sv")]
 #[command(about = "SSH Vault - CLI tool to ease your work with ssh configs")]
+#[command(version = env!("CARGO_PKG_VERSION"))]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,

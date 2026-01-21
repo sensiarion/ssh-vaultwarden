@@ -3,6 +3,15 @@ use std::fs;
 use tempfile::TempDir;
 
 #[test]
+fn test_version_flag_outputs_cargo_version() {
+    let mut cmd = Command::cargo_bin("sv").unwrap();
+    let output = cmd.arg("--version").assert().success();
+
+    let stdout = String::from_utf8(output.get_output().stdout.clone()).unwrap();
+    assert!(stdout.contains(env!("CARGO_PKG_VERSION")));
+}
+
+#[test]
 fn test_init_command() {
     let temp_dir = TempDir::new().unwrap();
     let config_path = temp_dir.path().join(".ssh-vaultvarden.toml");
