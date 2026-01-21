@@ -50,7 +50,23 @@ curl -LsSf https://github.com/sensiarion/ssh-vaultwarden/releases/latest/downloa
 sv --version
 ```
 
-- **Windows (PowerShell installer)**:
+**WSL warning**: to run this util on wsl, you need to install keyring into your wsl.
+
+Ubuntu/Debian
+
+```
+apt-get update
+apt install -y gnome-keyring python3-venv python3-dev
+pip3 install --upgrade pip
+pip3 install keyring
+
+# to check it's working
+echo 'somecredstorepass' | gnome-keyring-daemon --unlock
+```
+
+install tutorial adapted from [here](https://github.com/jaraco/keyring#using-keyring-on-headless-linux-systems)
+
+- **Windows (PowerShell installer)**: (keyring is not supported, only file mode)
 
 ```powershell
 irm https://github.com/sensiarion/ssh-vaultwarden/releases/latest/download/ssh-vaultvarden-installer.ps1 | iex
