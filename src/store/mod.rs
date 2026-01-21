@@ -33,6 +33,7 @@ mod tests {
                 user: "test".to_string(),
                 ip: "1.2.3.4".to_string(),
                 password: "pass".to_string(),
+                notes: None,
             },
         ];
 

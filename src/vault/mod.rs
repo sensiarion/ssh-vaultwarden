@@ -9,6 +9,8 @@ pub struct SshEntry {
     pub user: String,
     pub ip: String,
     pub password: String,
+    #[serde(default)]
+    pub notes: Option<String>,
 }
 
 impl SshEntry {
@@ -16,6 +18,12 @@ impl SshEntry {
         let pattern_lower = pattern.to_lowercase();
         self.user.to_lowercase().contains(&pattern_lower)
             || self.ip.to_lowercase().contains(&pattern_lower)
+            || self
+                .notes
+                .clone()
+                .unwrap_or("".to_string())
+                .to_lowercase()
+                .contains(&pattern_lower)
     }
 }
 
@@ -34,6 +42,7 @@ mod tests {
             user: "admin".to_string(),
             ip: "192.168.1.1".to_string(),
             password: "secret".to_string(),
+            notes: None,
         };
 
         assert!(entry.matches_pattern("admin"));
@@ -42,4 +51,3 @@ mod tests {
         assert!(!entry.matches_pattern("nonexistent"));
     }
 }
-

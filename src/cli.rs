@@ -1,10 +1,10 @@
 use crate::config::Config;
-use crate::store::{Store, file::FileStore};
-use crate::vault::{VaultApi, mock::MockVaultApi, real::RealVaultApi};
+use crate::store::{file::FileStore, Store};
+use crate::vault::{mock::MockVaultApi, real::RealVaultApi, VaultApi};
 use crate::Result;
-use std::env;
 use clap::{Parser, Subcommand};
-use inquire::{Text, Select, Password};
+use inquire::{Password, Select, Text};
+use std::env;
 use std::io::{self, BufRead};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -15,7 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,
-    
+
     /// Connect to SSH server (short for 'connect')
     #[arg(short = 'c', long = "connect")]
     pub connect_pattern: Option<String>,
@@ -84,10 +84,13 @@ impl App {
             }
             return self.handle_connect(&pattern);
         }
-        
+
         // Handle subcommands
         match cmd {
-            Some(Commands::Init { overwrite, non_interactive }) => self.handle_init(overwrite, non_interactive),
+            Some(Commands::Init {
+                overwrite,
+                non_interactive,
+            }) => self.handle_init(overwrite, non_interactive),
             Some(Commands::Search { pattern }) => self.handle_search(&pattern),
             Some(Commands::Connect { pattern }) => self.handle_connect(&pattern),
             Some(Commands::Sync) => self.handle_sync(),
@@ -105,7 +108,9 @@ impl App {
             return Ok(());
         }
 
-        let (vault_url, email, ttl_minutes, collection_ids, organization_id) = if non_interactive || !atty::is(atty::Stream::Stdin) {
+        let (vault_url, email, ttl_minutes, collection_ids, organization_id) = if non_interactive
+            || !atty::is(atty::Stream::Stdin)
+        {
             // Non-interactive mode: read from stdin or use defaults
             self.read_from_stdin()?
         } else {
@@ -114,7 +119,9 @@ impl App {
             println!();
 
             let vault_url = Text::new("Vault URL:")
-                .with_help_message("Enter your Vaultwarden instance URL (e.g., https://vault.example.com)")
+                .with_help_message(
+                    "Enter your Vaultwarden instance URL (e.g., https://vault.example.com)",
+                )
                 .with_default("https://yourinstance.com")
                 .prompt()
                 .map_err(|e| crate::Error::Config(format!("Failed to read input: {}", e)))?;
@@ -126,10 +133,12 @@ impl App {
                 .filter(|s| !s.trim().is_empty());
 
             let ttl_str = Text::new("TTL in minutes (optional):")
-                .with_help_message("Enter TTL in minutes for auto-sync (leave empty for no auto-sync)")
+                .with_help_message(
+                    "Enter TTL in minutes for auto-sync (leave empty for no auto-sync)",
+                )
                 .prompt_skippable()
                 .map_err(|e| crate::Error::Config(format!("Failed to read input: {}", e)))?;
-            
+
             let ttl_minutes = ttl_str
                 .and_then(|s| s.trim().parse::<u64>().ok())
                 .filter(|&v| v > 0);
@@ -146,7 +155,13 @@ impl App {
                 .map_err(|e| crate::Error::Config(format!("Failed to read input: {}", e)))?
                 .filter(|s| !s.trim().is_empty());
 
-            (vault_url, email, ttl_minutes, collection_ids, organization_id)
+            (
+                vault_url,
+                email,
+                ttl_minutes,
+                collection_ids,
+                organization_id,
+            )
         };
 
         let config = Config {
@@ -165,7 +180,15 @@ impl App {
         Ok(())
     }
 
-    fn read_from_stdin(&self) -> Result<(String, Option<String>, Option<u64>, Option<Vec<String>>, Option<String>)> {
+    fn read_from_stdin(
+        &self,
+    ) -> Result<(
+        String,
+        Option<String>,
+        Option<u64>,
+        Option<Vec<String>>,
+        Option<String>,
+    )> {
         let stdin = io::stdin();
         let mut lines = stdin.lock().lines();
 
@@ -208,21 +231,22 @@ impl App {
             .and_then(|s| Self::parse_collection_ids(&s));
 
         // Read organization ID (fifth line, optional)
-        let organization_id = lines
-            .next()
-            .transpose()
-            .ok()
-            .flatten()
-            .and_then(|s| {
-                let trimmed = s.trim();
-                if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(trimmed.to_string())
-                }
-            });
+        let organization_id = lines.next().transpose().ok().flatten().and_then(|s| {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
 
-        Ok((vault_url, email, ttl_minutes, collection_ids, organization_id))
+        Ok((
+            vault_url,
+            email,
+            ttl_minutes,
+            collection_ids,
+            organization_id,
+        ))
     }
 
     fn parse_collection_ids(input: &str) -> Option<Vec<String>> {
@@ -265,10 +289,17 @@ impl App {
 
         println!("Found {} matching entries:", matches.len());
         for entry in &matches {
-            println!("  ssh {}@{}", entry.user, entry.ip);
+            println!("  ssh {}@{}{}", entry.user, entry.ip, self._display_notes(&entry.notes));
         }
 
         Ok(())
+    }
+
+    fn _display_notes(&self, notes: &Option<String>) -> String {
+        notes
+            .as_ref()
+            .map(|n| format!(" [{}]", n.replace("\n", " ")))
+            .unwrap_or_default()
     }
 
     fn handle_connect(&self, pattern: &str) -> Result<()> {
@@ -303,7 +334,7 @@ impl App {
                 // Non-interactive: use first match
                 println!("Found {} matching entries, using first:", matches.len());
                 for (i, e) in matches.iter().enumerate() {
-                    println!("  {}. {}@{}", i + 1, e.user, e.ip);
+                    println!("  {}. {}@{}{}", i + 1, e.user, e.ip, self._display_notes(&e.notes));
                 }
                 &matches[0]
             } else {
@@ -311,16 +342,20 @@ impl App {
                 println!("Found {} matching entries:", matches.len());
                 let options: Vec<String> = matches
                     .iter()
-                    .map(|e| format!("{}@{}", e.user, e.ip))
+                    .map(|e| {
+                        format!("{}@{}{}", e.user, e.ip, self._display_notes(&e.notes))
+                    })
                     .collect();
-                
+
                 let selection = Select::new("Select entry to connect:", options)
                     .prompt()
                     .map_err(|e| crate::Error::Config(format!("Failed to select entry: {}", e)))?;
-                
+
                 matches
                     .iter()
-                    .find(|e| format!("{}@{}", e.user, e.ip) == selection)
+                    .find(|e| {
+                        format!("{}@{}{}", e.user, e.ip, self._display_notes(&e.notes)) == selection
+                    })
                     .ok_or_else(|| crate::Error::Config("Selected entry not found".to_string()))?
             }
         };
@@ -343,7 +378,10 @@ impl App {
         {
             Ok(status) => {
                 if !status.success() {
-                    eprintln!("SSH command exited with status: {}", status.code().unwrap_or(-1));
+                    eprintln!(
+                        "SSH command exited with status: {}",
+                        status.code().unwrap_or(-1)
+                    );
                 }
             }
             Err(e) => {
@@ -373,7 +411,7 @@ impl App {
         if cache_exists {
             println!("Using cached vault data from .ssh-vaultvarden-sync.json");
         }
-        
+
         // Get email if needed
         let email = if cache_exists {
             String::new()
@@ -393,7 +431,9 @@ impl App {
                     .next()
                     .transpose()
                     .map_err(|e| crate::Error::Config(format!("Failed to read from stdin: {}", e)))?
-                    .ok_or_else(|| crate::Error::Config("Email required but not provided".to_string()))?
+                    .ok_or_else(|| {
+                        crate::Error::Config("Email required but not provided".to_string())
+                    })?
             }
         };
 
@@ -417,13 +457,15 @@ impl App {
                 .next()
                 .transpose()
                 .map_err(|e| crate::Error::Config(format!("Failed to read from stdin: {}", e)))?
-                .ok_or_else(|| crate::Error::Config("Password required but not provided".to_string()))?
+                .ok_or_else(|| {
+                    crate::Error::Config("Password required but not provided".to_string())
+                })?
         };
 
         if !cache_exists {
             println!("Authenticating with vault...");
         }
-        
+
         // Authenticate with vault (mutable reference needed)
         // We need to get mutable access to vault
         // Since we can't mutate through trait object, we'll need to restructure
@@ -441,20 +483,20 @@ impl App {
         if !cache_exists {
             vault.authenticate(email, password)?;
         }
-        
+
         println!("Syncing entries from vault...");
-        
+
         // Fetch entries from vault
         let entries = vault.search("")?;
         self.store.save_entries(&entries)?;
-        
+
         // Update sync timestamp
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|e| crate::Error::Config(format!("Failed to get timestamp: {}", e)))?
             .as_secs() as i64;
         self.store.set_sync_timestamp(timestamp)?;
-        
+
         println!("Synced {} entries from vault", entries.len());
         Ok(())
     }
@@ -492,16 +534,15 @@ impl App {
             .duration_since(UNIX_EPOCH)
             .map_err(|e| crate::Error::Config(format!("Failed to get timestamp: {}", e)))?
             .as_secs() as i64;
-        
+
         let elapsed_minutes = (now - last_sync) / 60;
-        
+
         if elapsed_minutes >= ttl_minutes as i64 {
             // Sync expired - prompt user
             if atty::is(atty::Stream::Stdout) {
                 println!(
                     "Store is {} minutes old (TTL: {} minutes). Run 'sv sync' to update.",
-                    elapsed_minutes,
-                    ttl_minutes
+                    elapsed_minutes, ttl_minutes
                 );
             }
         }
@@ -532,4 +573,3 @@ mod tests {
         assert!(result.is_ok());
     }
 }
-

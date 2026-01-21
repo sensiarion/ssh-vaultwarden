@@ -1,23 +1,22 @@
 use crate::config::Config;
-use crate::{Error, Result};
 use crate::vault::{SshEntry, VaultApi};
-use regex::Regex;
+use crate::{Error, Result};
+use aes::Aes256;
+use base64::{engine::general_purpose, Engine as _};
+use cbc::Decryptor;
+use cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
+use hkdf::Hkdf;
+use hmac::{Hmac, Mac};
 use log::debug;
-use std::collections::{HashSet, VecDeque};
+use pbkdf2::pbkdf2_hmac;
+use regex::Regex;
+use rsa::pkcs8::DecodePrivateKey;
+use rsa::{Oaep, Pkcs1v15Encrypt, RsaPrivateKey};
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use uuid::Uuid;
-use pbkdf2::pbkdf2_hmac;
-use sha2::Sha256;
-use base64::{Engine as _, engine::general_purpose};
-use aes::Aes256;
-use cbc::Decryptor;
-use cipher::{KeyIvInit, block_padding::Pkcs7, BlockDecryptMut};
-use hmac::{Hmac, Mac};
-use hkdf::Hkdf;
-use rsa::{Pkcs1v15Encrypt, RsaPrivateKey, Oaep};
-use rsa::pkcs8::DecodePrivateKey;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TokenResponse {
@@ -93,7 +92,7 @@ struct SymmetricKey {
 struct OrganizationResponse {
     id: String,
     name: Option<String>,
-    key: Option<String>,  // RSA-encrypted organization key
+    key: Option<String>, // RSA-encrypted organization key
     #[serde(flatten)]
     _other: HashMap<String, serde_json::Value>,
 }
@@ -162,36 +161,41 @@ impl RealVaultApi {
     }
 
     fn prelogin(&self, email: &str) -> Result<PreloginResponse> {
-        let url = format!("{}/identity/accounts/prelogin", self.config.vault_url.trim_end_matches('/'));
-        
+        let url = format!(
+            "{}/identity/accounts/prelogin",
+            self.config.vault_url.trim_end_matches('/')
+        );
+
         let mut params = HashMap::new();
         let normalized_email = email.trim().to_lowercase();
         params.insert("email", normalized_email.as_str());
 
-        let response = self
-            .client
-            .post(&url)
-            .json(&params)
-            .send()
-            .map_err(|e| Error::Vault(format!("Failed to connect to vault for prelogin: {}", e)))?;
+        let response =
+            self.client.post(&url).json(&params).send().map_err(|e| {
+                Error::Vault(format!("Failed to connect to vault for prelogin: {}", e))
+            })?;
 
         if !response.status().is_success() {
             let status = response.status();
-            let text = response.text().unwrap_or_else(|_| "Unknown error".to_string());
+            let text = response
+                .text()
+                .unwrap_or_else(|_| "Unknown error".to_string());
             return Err(Error::Vault(format!(
                 "Prelogin failed with status {}: {}",
                 status, text
             )));
         }
 
-        let text = response.text()
+        let text = response
+            .text()
             .map_err(|e| Error::Vault(format!("Failed to read prelogin response: {}", e)))?;
-        
-        let prelogin: PreloginResponse = serde_json::from_str(&text)
-            .map_err(|e| Error::Vault(format!(
+
+        let prelogin: PreloginResponse = serde_json::from_str(&text).map_err(|e| {
+            Error::Vault(format!(
                 "Failed to parse prelogin response: {}. Response body: {}",
                 e, text
-            )))?;
+            ))
+        })?;
 
         Ok(prelogin)
     }
@@ -202,12 +206,21 @@ impl RealVaultApi {
         hash
     }
 
-    fn derive_master_key(email: &str, password: &str, kdf: u8, kdf_iterations: u32) -> Result<[u8; 32]> {
+    fn derive_master_key(
+        email: &str,
+        password: &str,
+        kdf: u8,
+        kdf_iterations: u32,
+    ) -> Result<[u8; 32]> {
         match kdf {
             0 => {
                 // CRITICAL: Bitwarden requires lowercase email as salt
                 let salt = email.trim().to_lowercase();
-                Ok(Self::pbkdf2_hash(password.as_bytes(), salt.as_bytes(), kdf_iterations))
+                Ok(Self::pbkdf2_hash(
+                    password.as_bytes(),
+                    salt.as_bytes(),
+                    kdf_iterations,
+                ))
             }
             _ => Err(Error::Vault(format!(
                 "Argon2id KDF (type {}) not yet implemented. Please use PBKDF2 (kdf=0)",
@@ -228,21 +241,22 @@ impl RealVaultApi {
         // - info = "mac" for MAC key
         let hkdf = Hkdf::<Sha256>::from_prk(master_key)
             .map_err(|_| Error::Vault("Failed to create HKDF from master key".to_string()))?;
-        
+
         let mut enc_key = [0u8; 32];
         let mut mac_key = [0u8; 32];
-        
+
         // Expand with info "enc" to get encryption key
         hkdf.expand(b"enc", &mut enc_key)
             .map_err(|_| Error::Vault("Failed to derive enc key via HKDF".to_string()))?;
-        
+
         // Expand with info "mac" to get MAC key
         hkdf.expand(b"mac", &mut mac_key)
             .map_err(|_| Error::Vault("Failed to derive mac key via HKDF".to_string()))?;
 
         debug!(
             "Stretched key - enc first 8 bytes: {:02x?}, mac first 8 bytes: {:02x?}",
-            &enc_key[..8], &mac_key[..8]
+            &enc_key[..8],
+            &mac_key[..8]
         );
 
         Ok(SymmetricKey {
@@ -320,7 +334,7 @@ impl RealVaultApi {
 
         let iv = Self::decode_b64(segments[0])
             .map_err(|e| Error::Vault(format!("Invalid IV base64: {}", e)))?;
-        
+
         // Validate IV length - AES-CBC requires exactly 16 bytes
         if iv.len() != 16 {
             return Err(Error::Vault(format!(
@@ -354,15 +368,19 @@ impl RealVaultApi {
                 .map_err(|_| Error::Vault("Invalid MAC key for HMAC".to_string()))?;
             hmac.update(&iv);
             hmac.update(&ciphertext);
-            
+
             // Debug: compute MAC and compare
             let computed_mac = hmac.clone().finalize().into_bytes();
             debug!(
                 "MAC comparison - expected first 8: {:02x?}, computed first 8: {:02x?}",
-                &mac[..8], &computed_mac[..8]
+                &mac[..8],
+                &computed_mac[..8]
             );
-            hmac.verify_slice(&mac)
-                .map_err(|_| Error::Vault("MAC validation failed - data may be corrupted or key is incorrect".to_string()))?;
+            hmac.verify_slice(&mac).map_err(|_| {
+                Error::Vault(
+                    "MAC validation failed - data may be corrupted or key is incorrect".to_string(),
+                )
+            })?;
         } else if enc_type != 1 {
             return Err(Error::Vault(format!(
                 "Unsupported enc string type {}",
@@ -425,7 +443,7 @@ impl RealVaultApi {
     /// Decrypt the user's RSA private key using the user symmetric key
     fn decrypt_private_key(encrypted_key: &str, user_key: &SymmetricKey) -> Result<RsaPrivateKey> {
         let decrypted_der = Self::decrypt_enc_string(encrypted_key, user_key)?;
-        
+
         // The decrypted data is the private key in DER format
         RsaPrivateKey::from_pkcs8_der(&decrypted_der)
             .map_err(|e| Error::Vault(format!("Failed to parse RSA private key: {}", e)))
@@ -438,43 +456,48 @@ impl RealVaultApi {
         if let Ok(decrypted) = private_key.decrypt(padding, encrypted_data) {
             return Ok(decrypted);
         }
-        
+
         // Try RSA-OAEP with SHA-256
         let padding = Oaep::new::<Sha256>();
         if let Ok(decrypted) = private_key.decrypt(padding, encrypted_data) {
             return Ok(decrypted);
         }
-        
+
         // Try PKCS1v15 as last resort
         if let Ok(decrypted) = private_key.decrypt(Pkcs1v15Encrypt, encrypted_data) {
             return Ok(decrypted);
         }
-        
-        Err(Error::Vault("Failed to decrypt RSA data with any padding scheme".to_string()))
+
+        Err(Error::Vault(
+            "Failed to decrypt RSA data with any padding scheme".to_string(),
+        ))
     }
 
     /// Decrypt an organization key (RSA-encrypted with user's public key)
     fn decrypt_org_key(&self, encrypted_org_key: &str) -> Result<SymmetricKey> {
-        let private_key = self.private_key.as_ref()
-            .ok_or_else(|| Error::Vault("Private key not available for org key decryption".to_string()))?;
-        
+        let private_key = self.private_key.as_ref().ok_or_else(|| {
+            Error::Vault("Private key not available for org key decryption".to_string())
+        })?;
+
         // Parse the encrypted string format: "type.data" or just base64 data
         let encrypted_data = if encrypted_org_key.contains('.') {
             // Format: "type.base64data"
             let mut parts = encrypted_org_key.splitn(2, '.');
-            let enc_type = parts.next()
+            let enc_type = parts
+                .next()
                 .ok_or_else(|| Error::Vault("Invalid org key format".to_string()))?;
-            let data = parts.next()
+            let data = parts
+                .next()
                 .ok_or_else(|| Error::Vault("Invalid org key format".to_string()))?;
-            
+
             debug!("Org key enc type: {}", enc_type);
             Self::decode_b64(data)?
         } else {
             Self::decode_b64(encrypted_org_key)?
         };
-        
+
         let decrypted = Self::decrypt_rsa(&encrypted_data, private_key)?;
-        
+
         // The decrypted org key should be 64 bytes (32 enc + 32 mac)
         if decrypted.len() == 64 {
             Ok(SymmetricKey {
@@ -513,25 +536,24 @@ impl RealVaultApi {
         None
     }
 
-
     fn decrypt_string(&self, value: &str) -> Result<String> {
         // Handle empty strings
         if value.is_empty() {
             return Ok(String::new());
         }
-        
+
         // If the value doesn't contain a dot, it's likely plain text (not encrypted)
         // Encrypted strings have format: "type.iv|ciphertext|mac"
         if !value.contains('.') {
             return Ok(value.to_string());
         }
-        
+
         // Check if it looks like an encrypted string (starts with digit followed by dot)
         if !value.chars().next().map_or(false, |c| c.is_ascii_digit()) {
             // Not an encrypted string, return as-is
             return Ok(value.to_string());
         }
-        
+
         let key = self
             .user_key
             .as_ref()
@@ -547,24 +569,29 @@ impl RealVaultApi {
         if value.is_empty() {
             return Ok(String::new());
         }
-        
+
         // If the value doesn't contain a dot, it's likely plain text (not encrypted)
         if !value.contains('.') {
             return Ok(value.to_string());
         }
-        
+
         // Check if it looks like an encrypted string (starts with digit followed by dot)
         if !value.chars().next().map_or(false, |c| c.is_ascii_digit()) {
             return Ok(value.to_string());
         }
-        
+
         let decrypted = Self::decrypt_enc_string(value, key)?;
         let text = String::from_utf8(decrypted)
             .map_err(|_| Error::Vault("Decrypted text is not valid UTF-8".to_string()))?;
         Ok(text)
     }
 
-    fn hash_password_v1(email: &str, password: &str, kdf: u8, kdf_iterations: u32) -> Result<String> {
+    fn hash_password_v1(
+        email: &str,
+        password: &str,
+        kdf: u8,
+        kdf_iterations: u32,
+    ) -> Result<String> {
         // Single PBKDF2 hash (email as salt)
         match kdf {
             0 => {
@@ -579,14 +606,20 @@ impl RealVaultApi {
         }
     }
 
-    fn hash_password_v2(email: &str, password: &str, kdf: u8, kdf_iterations: u32) -> Result<String> {
+    fn hash_password_v2(
+        email: &str,
+        password: &str,
+        kdf: u8,
+        kdf_iterations: u32,
+    ) -> Result<String> {
         // Double PBKDF2 hash used by some Bitwarden clients:
         // 1) master_key = PBKDF2(password, email, iterations)
         // 2) password_hash = PBKDF2(master_key, password, 1)
         match kdf {
             0 => {
                 let salt = email.trim().to_lowercase();
-                let master_key = Self::pbkdf2_hash(password.as_bytes(), salt.as_bytes(), kdf_iterations);
+                let master_key =
+                    Self::pbkdf2_hash(password.as_bytes(), salt.as_bytes(), kdf_iterations);
                 let password_hash = Self::pbkdf2_hash(&master_key, password.as_bytes(), 1);
                 Ok(general_purpose::STANDARD.encode(password_hash))
             }
@@ -604,9 +637,12 @@ impl RealVaultApi {
         device_identifier: &str,
         device_name: &str,
     ) -> Result<TokenResponse> {
-        let url = format!("{}/identity/connect/token", self.config.vault_url.trim_end_matches('/'));
+        let url = format!(
+            "{}/identity/connect/token",
+            self.config.vault_url.trim_end_matches('/')
+        );
         let normalized_email = email.trim().to_lowercase();
-        
+
         let mut params = HashMap::new();
         params.insert("grant_type", "password");
         params.insert("username", normalized_email.as_str());
@@ -626,7 +662,9 @@ impl RealVaultApi {
 
         if !response.status().is_success() {
             let status = response.status();
-            let text = response.text().unwrap_or_else(|_| "Unknown error".to_string());
+            let text = response
+                .text()
+                .unwrap_or_else(|_| "Unknown error".to_string());
             return Err(Error::Vault(format!(
                 "Login failed with status {}: {}",
                 status, text
@@ -654,15 +692,13 @@ impl RealVaultApi {
             "KDF parameters: type={}, iterations={}",
             prelogin.kdf, prelogin.kdf_iterations
         );
-        let master_key = Self::derive_master_key(email, password, prelogin.kdf, prelogin.kdf_iterations)?;
-        debug!(
-            "Master key first 8 bytes: {:02x?}",
-            &master_key[..8]
-        );
+        let master_key =
+            Self::derive_master_key(email, password, prelogin.kdf, prelogin.kdf_iterations)?;
+        debug!("Master key first 8 bytes: {:02x?}", &master_key[..8]);
         let master_password_hash = Self::derive_master_password_hash(&master_key, password);
         self.master_key = Some(master_key);
         self.master_password_hash = Some(master_password_hash);
-        
+
         // Generate device identifier and name for this client
         let device_identifier = Uuid::new_v4().to_string();
         let device_name = format!("ssh-vaultvarden-{}", device_identifier);
@@ -670,36 +706,59 @@ impl RealVaultApi {
         // Step 2: Try the standard PBKDF2 hash
         let password_hash_v1 =
             Self::hash_password_v1(email, password, prelogin.kdf, prelogin.kdf_iterations)?;
-        let token = match self.request_token(email, &password_hash_v1, &device_identifier, &device_name) {
-            Ok(token) => token,
-            Err(err) => {
-                let err_text = err.to_string();
-                if err_text.contains("Username or password is incorrect") {
-                    // Step 3: Fallback to the double-PBKDF2 hash used by some clients
-                    let password_hash_v2 =
-                        Self::hash_password_v2(email, password, prelogin.kdf, prelogin.kdf_iterations)?;
-                    self.request_token(email, &password_hash_v2, &device_identifier, &device_name)?
-                } else {
-                    return Err(err);
+        let token =
+            match self.request_token(email, &password_hash_v1, &device_identifier, &device_name) {
+                Ok(token) => token,
+                Err(err) => {
+                    let err_text = err.to_string();
+                    if err_text.contains("Username or password is incorrect") {
+                        // Step 3: Fallback to the double-PBKDF2 hash used by some clients
+                        let password_hash_v2 = Self::hash_password_v2(
+                            email,
+                            password,
+                            prelogin.kdf,
+                            prelogin.kdf_iterations,
+                        )?;
+                        self.request_token(
+                            email,
+                            &password_hash_v2,
+                            &device_identifier,
+                            &device_name,
+                        )?
+                    } else {
+                        return Err(err);
+                    }
                 }
-            }
-        };
+            };
 
         self.access_token = Some(token.access_token);
         Ok(())
     }
 
     fn get_ciphers(&mut self) -> Result<Vec<CipherResponse>> {
+        // Check cache first - if it exists and looks decrypted, use it
         if let Some(cache) = Self::load_cache()? {
-            debug!("Loaded {} ciphers from cache", cache.ciphers.len());
-            self.collections_cache = cache.collections;
-            return Ok(cache.ciphers);
+            // Check if cached ciphers look decrypted (don't start with encryption type number)
+            let looks_decrypted = cache.ciphers.iter().take(10).all(|c| {
+                !c.name
+                    .chars()
+                    .next()
+                    .map_or(false, |ch| ch.is_ascii_digit() && c.name.contains('.'))
+            });
+
+            if looks_decrypted && !cache.ciphers.is_empty() {
+                debug!("Using {} decrypted ciphers from cache", cache.ciphers.len());
+                self.collections_cache = cache.collections;
+                return Ok(cache.ciphers);
+            } else {
+                debug!("Cache exists but ciphers appear encrypted, fetching fresh data");
+            }
         }
 
-        let token = self
-            .access_token
-            .as_ref()
-            .ok_or_else(|| Error::Vault("Not authenticated. Call authenticate() first.".to_string()))?;
+        // Need to authenticate and fetch fresh data
+        let token = self.access_token.as_ref().ok_or_else(|| {
+            Error::Vault("Not authenticated. Call authenticate() first.".to_string())
+        })?;
 
         let url = format!("{}/api/sync", self.config.vault_url.trim_end_matches('/'));
 
@@ -712,7 +771,9 @@ impl RealVaultApi {
 
         if !response.status().is_success() {
             let status = response.status();
-            let text = response.text().unwrap_or_else(|_| "Unknown error".to_string());
+            let text = response
+                .text()
+                .unwrap_or_else(|_| "Unknown error".to_string());
             return Err(Error::Vault(format!(
                 "Failed to fetch sync data with status {}: {}",
                 status, text
@@ -723,8 +784,12 @@ impl RealVaultApi {
             .text()
             .map_err(|e| Error::Vault(format!("Failed to read sync response: {}", e)))?;
 
-        let value: serde_json::Value = serde_json::from_str(&text)
-            .map_err(|e| Error::Vault(format!("Failed to parse sync data: {}. Response body: {}", e, text)))?;
+        let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+            Error::Vault(format!(
+                "Failed to parse sync data: {}. Response body: {}",
+                e, text
+            ))
+        })?;
 
         let profile = value
             .get("profile")
@@ -751,45 +816,47 @@ impl RealVaultApi {
             }
         } else {
             // Normal case: decrypt the encrypted profile key using the master key
-            let master_key = self
-                .master_key
-                .ok_or_else(|| Error::Vault("Missing master key for decryption. Please authenticate first.".to_string()))?;
+            let master_key = self.master_key.ok_or_else(|| {
+                Error::Vault(
+                    "Missing master key for decryption. Please authenticate first.".to_string(),
+                )
+            })?;
             let stretched_master_key = Self::stretch_master_key(&master_key)
                 .map_err(|e| Error::Vault(format!("Failed to stretch master key: {}", e)))?;
-            
+
             debug!("Decrypting profile key using master key");
             let decrypted_key = Self::decrypt_enc_string(key_enc, &stretched_master_key)
                 .map_err(|e| Error::Vault(format!("Failed to decrypt profile key: {}. This usually means the master password is incorrect.", e)))?;
-            
+
             debug!(
                 "Decrypted profile key: {} bytes, first 16: {:02x?}",
                 decrypted_key.len(),
                 &decrypted_key[..std::cmp::min(16, decrypted_key.len())]
             );
-            
+
             let key_bytes = Self::decode_key_bytes(&decrypted_key)
                 .map_err(|e| Error::Vault(format!("Failed to decode user key bytes: {}", e)))?;
-            
+
             debug!(
                 "Decoded user key: {} bytes, enc first 8: {:02x?}, mac first 8: {:02x?}",
                 key_bytes.len(),
                 &key_bytes[..8],
                 &key_bytes[32..40]
             );
-            
+
             if key_bytes.len() != 64 {
                 return Err(Error::Vault(format!(
                     "Invalid user key length: expected 64 bytes, got {}",
                     key_bytes.len()
                 )));
             }
-            
+
             SymmetricKey {
                 enc_key: key_bytes[..32].to_vec(),
                 mac_key: key_bytes[32..].to_vec(),
             }
         };
-        
+
         self.user_key = Some(user_key);
 
         // Decrypt the user's RSA private key (needed for organization key decryption)
@@ -808,7 +875,9 @@ impl RealVaultApi {
 
         // Decrypt organization keys
         if let Some(orgs) = profile.get("organizations") {
-            if let Ok(organizations) = serde_json::from_value::<Vec<OrganizationResponse>>(orgs.clone()) {
+            if let Ok(organizations) =
+                serde_json::from_value::<Vec<OrganizationResponse>>(orgs.clone())
+            {
                 debug!("Found {} organizations", organizations.len());
                 for org in organizations {
                     if let Some(ref org_key_enc) = org.key {
@@ -829,7 +898,9 @@ impl RealVaultApi {
 
         if let Some(collections) = value.get("collections") {
             let collections: Vec<CollectionResponse> = serde_json::from_value(collections.clone())
-                .map_err(|e| Error::Vault(format!("Failed to parse collections from sync: {}", e)))?;
+                .map_err(|e| {
+                    Error::Vault(format!("Failed to parse collections from sync: {}", e))
+                })?;
             self.collections_cache = Some(collections);
         }
 
@@ -842,13 +913,16 @@ impl RealVaultApi {
         // Decrypt ciphers - handle both personal and organization items
         let mut decrypted_ciphers = Vec::new();
         let mut skipped_count = 0;
-        
+
         for mut cipher in ciphers {
             // Determine which key to use for decryption
             let decryption_key = if let Some(ref org_id) = cipher.organization_id {
                 // Organization item - use org key
                 if let Some(org_key) = self.org_keys.get(org_id) {
-                    debug!("Decrypting organization cipher: {} (org_id: {})", cipher.id, org_id);
+                    debug!(
+                        "Decrypting organization cipher: {} (org_id: {})",
+                        cipher.id, org_id
+                    );
                     org_key
                 } else {
                     debug!(
@@ -863,7 +937,7 @@ impl RealVaultApi {
                 debug!("Decrypting personal cipher: {}", cipher.id);
                 self.user_key.as_ref().unwrap()
             };
-            
+
             let decrypted_name = self.decrypt_string_with_key(&cipher.name, decryption_key)?;
             cipher.name = decrypted_name;
             if let Some(ref notes) = cipher.notes {
@@ -879,7 +953,8 @@ impl RealVaultApi {
                 if let Some(ref mut uris) = login.uris {
                     for uri in uris {
                         if let Some(ref uri_value) = uri.uri {
-                            uri.uri = Some(self.decrypt_string_with_key(uri_value, decryption_key)?);
+                            uri.uri =
+                                Some(self.decrypt_string_with_key(uri_value, decryption_key)?);
                         }
                     }
                 }
@@ -889,7 +964,8 @@ impl RealVaultApi {
 
         debug!(
             "Decrypted {} ciphers, skipped {} (no key available)",
-            decrypted_ciphers.len(), skipped_count
+            decrypted_ciphers.len(),
+            skipped_count
         );
 
         for cipher in &decrypted_ciphers {
@@ -905,14 +981,16 @@ impl RealVaultApi {
     }
 
     fn get_collections(&self) -> Result<Vec<CollectionResponse>> {
-        let token = self
-            .access_token
-            .as_ref()
-            .ok_or_else(|| Error::Vault("Not authenticated. Call authenticate() first.".to_string()))?;
+        let token = self.access_token.as_ref().ok_or_else(|| {
+            Error::Vault("Not authenticated. Call authenticate() first.".to_string())
+        })?;
 
         let base_url = self.config.vault_url.trim_end_matches('/');
         let url = if let Some(ref organization_id) = self.config.organization_id {
-            format!("{}/api/organizations/{}/collections", base_url, organization_id)
+            format!(
+                "{}/api/organizations/{}/collections",
+                base_url, organization_id
+            )
         } else {
             format!("{}/api/collections", base_url)
         };
@@ -926,7 +1004,9 @@ impl RealVaultApi {
 
         if !response.status().is_success() {
             let status = response.status();
-            let text = response.text().unwrap_or_else(|_| "Unknown error".to_string());
+            let text = response
+                .text()
+                .unwrap_or_else(|_| "Unknown error".to_string());
             return Err(Error::Vault(format!(
                 "Failed to fetch collections with status {}: {}",
                 status, text
@@ -937,8 +1017,12 @@ impl RealVaultApi {
             .text()
             .map_err(|e| Error::Vault(format!("Failed to read collections response: {}", e)))?;
 
-        let value: serde_json::Value = serde_json::from_str(&text)
-            .map_err(|e| Error::Vault(format!("Failed to parse collections: {}. Response body: {}", e, text)))?;
+        let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+            Error::Vault(format!(
+                "Failed to parse collections: {}. Response body: {}",
+                e, text
+            ))
+        })?;
 
         if value.is_array() {
             let collections: Vec<CollectionResponse> = serde_json::from_value(value)
@@ -958,142 +1042,54 @@ impl RealVaultApi {
         )))
     }
 
-    fn expand_collection_ids(
-        collections: &[CollectionResponse],
-        base_ids: &[String],
-    ) -> HashSet<String> {
-        let mut children_map: HashMap<String, Vec<String>> = HashMap::new();
-        for collection in collections {
-            if let Some(ref parent_id) = collection.parent_id {
-                children_map
-                    .entry(parent_id.clone())
-                    .or_default()
-                    .push(collection.id.clone());
+    /// Filter cipher based on organization ID from config
+    fn filter_cipher(&self, cipher: &CipherResponse) -> bool {
+        // Filter by organization ID if specified
+        if let Some(ref org_id) = self.config.organization_id {
+            if cipher.organization_id.as_ref() != Some(org_id) {
+                return false;
             }
         }
 
-        let mut expanded: HashSet<String> = HashSet::new();
-        let mut queue: VecDeque<String> = base_ids.iter().cloned().collect();
-
-        while let Some(current_id) = queue.pop_front() {
-            if expanded.insert(current_id.clone()) {
-                if let Some(children) = children_map.get(&current_id) {
-                    for child in children {
-                        queue.push_back(child.clone());
-                    }
-                }
-            }
-        }
-
-        expanded
+        true
     }
 
-    fn extract_ssh_entry(
-        cipher: &CipherResponse,
-        ssh_pattern: &Regex,
-    ) -> Option<SshEntry> {
-            if let Some(captures) = ssh_pattern.captures(&cipher.name) {
-                if let (Some(user), Some(ip)) = (captures.get(1), captures.get(2)) {
-                    let password = cipher
-                        .login
-                        .as_ref()
-                        .and_then(|l| l.password.as_ref())
-                        .cloned()
-                        .unwrap_or_else(|| "".to_string());
+    fn extract_ssh_entry(cipher: &CipherResponse, ssh_pattern: &Regex) -> Option<SshEntry> {
+        let password = cipher
+            .login
+            .as_ref()
+            .and_then(|l| l.password.as_ref())
+            .cloned()
+            .unwrap_or_default();
 
-                return Some(SshEntry {
-                        user: user.as_str().to_string(),
-                        ip: ip.as_str().to_string(),
-                        password,
-                    });
-                }
-            }
-
-            if let Some(ref notes) = cipher.notes {
-                if let Some(captures) = ssh_pattern.captures(notes) {
-                    if let (Some(user), Some(ip)) = (captures.get(1), captures.get(2)) {
-                        let password = cipher
-                            .login
-                            .as_ref()
-                            .and_then(|l| l.password.as_ref())
-                            .cloned()
-                            .unwrap_or_else(|| "".to_string());
-
-                    return Some(SshEntry {
-                            user: user.as_str().to_string(),
-                            ip: ip.as_str().to_string(),
-                            password,
-                        });
-                    }
-                }
-            }
-
-            if let Some(ref login_data) = cipher.login {
-                if let Some(ref uris) = login_data.uris {
-                    for uri_data in uris {
-                        if let Some(ref uri) = uri_data.uri {
-                            if let Some(captures) = ssh_pattern.captures(uri) {
-                                if let (Some(user), Some(ip)) = (captures.get(1), captures.get(2)) {
-                                    let password = login_data
-                                        .password
-                                        .as_ref()
-                                        .cloned()
-                                        .unwrap_or_else(|| "".to_string());
-
-                                return Some(SshEntry {
-                                        user: user.as_str().to_string(),
-                                        ip: ip.as_str().to_string(),
-                                        password,
-                                    });
-                            }
-                        }
-                    }
-                }
-            }
+        if let Some(captures) = ssh_pattern.captures(&cipher.name) {
+            let user = captures.get(1).unwrap().as_str();
+            let host = captures.get(2).unwrap().as_str();
+            debug!(
+                "Matched SSH entry from '{}': {}@{} (cipher: {})",
+                &cipher.name, user, host, cipher.id
+            );
+            return Some(SshEntry {
+                user: user.to_string(),
+                ip: host.to_string(),
+                password: password.clone(),
+                notes: cipher.notes.clone(),
+            });
         }
 
         None
     }
 
     fn parse_ssh_entries(&self, ciphers: Vec<CipherResponse>) -> Result<Vec<SshEntry>> {
-        // Pattern to match: ssh user@ip or ssh user@hostname
-        let ssh_pattern = Regex::new(r"(?i)ssh\s+(\S+)@(\S+)").unwrap();
+        // Pattern: optional "ssh" prefix (case-insensitive), then user@host
+        let ssh_pattern = Regex::new(r"(?i)(?:ssh\s*)?(\S+)@(\S+)").unwrap();
         let mut entries = Vec::new();
-
-        let expanded_collection_ids = if let Some(ref collection_ids) = self.config.collection_ids {
-            let collections = if let Some(ref cached) = self.collections_cache {
-                cached.clone()
-            } else {
-                self.get_collections()?
-            };
-            let expanded = Self::expand_collection_ids(&collections, collection_ids);
-            debug!(
-                "Expanded collection IDs from {} to {}",
-                collection_ids.len(),
-                expanded.len()
-            );
-            Some(expanded)
-        } else {
-            None
-        };
+        let total_ciphers = ciphers.len();
 
         for cipher in ciphers {
-            // Filter by collection IDs if specified
-            if let Some(ref expanded_ids) = expanded_collection_ids {
-                if let Some(ref cipher_collections) = cipher.collection_ids {
-                    if !cipher_collections.iter().any(|id| expanded_ids.contains(id)) {
-                        continue;
-                    }
-                } else {
-                    continue;
-                }
-            }
-
-            // Filter by organization ID if specified
-            if let Some(ref organization_id) = self.config.organization_id {
-                if cipher.organization_id.as_ref() != Some(organization_id) {
-                    continue;
-                }
+            // Filter cipher based on organization ID
+            if !self.filter_cipher(&cipher) {
+                continue;
             }
 
             if let Some(entry) = Self::extract_ssh_entry(&cipher, &ssh_pattern) {
@@ -1101,6 +1097,11 @@ impl RealVaultApi {
             }
         }
 
+        debug!(
+            "Extracted {} SSH entries from {} ciphers",
+            entries.len(),
+            total_ciphers
+        );
         Ok(entries)
     }
 }
@@ -1141,15 +1142,39 @@ mod tests {
 
     #[test]
     fn test_ssh_pattern_matching() {
-        let pattern = Regex::new(r"(?i)ssh\s+(\S+)@(\S+)").unwrap();
-        
+        let pattern = Regex::new(r"(?i)ssh\s*(\S+)@(\S+)").unwrap();
+
+        // Test various formats
         assert!(pattern.is_match("ssh admin@192.168.1.1"));
         assert!(pattern.is_match("SSH root@10.0.0.1"));
         assert!(pattern.is_match("ssh user@example.com"));
-        
+        assert!(pattern.is_match("ssh  user@192.168.213.7")); // Multiple spaces
+        assert!(pattern.is_match("sshuser@192.168.1.1")); // No space
+        assert!(pattern.is_match("SSH admin@192.168.1.1")); // Uppercase
+        assert!(pattern.is_match("Some text ssh user@192.168.1.1 more text")); // In context
+
+        // Test extraction
         if let Some(captures) = pattern.captures("ssh admin@192.168.1.1") {
             assert_eq!(captures.get(1).unwrap().as_str(), "admin");
             assert_eq!(captures.get(2).unwrap().as_str(), "192.168.1.1");
+        }
+
+        // Test with no space
+        if let Some(captures) = pattern.captures("sshuser@192.168.1.1") {
+            assert_eq!(captures.get(1).unwrap().as_str(), "user");
+            assert_eq!(captures.get(2).unwrap().as_str(), "192.168.1.1");
+        }
+
+        // Test with multiple spaces
+        if let Some(captures) = pattern.captures("ssh  user@192.168.213.7") {
+            assert_eq!(captures.get(1).unwrap().as_str(), "user");
+            assert_eq!(captures.get(2).unwrap().as_str(), "192.168.213.7");
+        }
+
+        // Test in context
+        if let Some(captures) = pattern.captures("Server: ssh root@10.0.0.1") {
+            assert_eq!(captures.get(1).unwrap().as_str(), "root");
+            assert_eq!(captures.get(2).unwrap().as_str(), "10.0.0.1");
         }
     }
 
@@ -1170,11 +1195,61 @@ mod tests {
             _other: HashMap::new(),
         };
 
-        let pattern = Regex::new(r"(?i)ssh\s+(\S+)@(\S+)").unwrap();
+        let pattern = Regex::new(r"(?i)ssh\s*(\S+)@(\S+)").unwrap();
         let entry = RealVaultApi::extract_ssh_entry(&cipher, &pattern).unwrap();
         assert_eq!(entry.user, "root");
         assert_eq!(entry.ip, "10.0.0.1");
         assert_eq!(entry.password, "secret");
+    }
+
+    #[test]
+    fn test_extract_ssh_entry_from_name_no_space() {
+        // Test with no space between ssh and user
+        let cipher = CipherResponse {
+            id: "1b".to_string(),
+            cipher_type: 1,
+            name: "sshuser@192.168.213.7".to_string(),
+            notes: None,
+            login: Some(LoginData {
+                username: Some("user".to_string()),
+                password: Some("pass123".to_string()),
+                uris: None,
+            }),
+            collection_ids: None,
+            organization_id: None,
+            _other: HashMap::new(),
+        };
+
+        let pattern = Regex::new(r"(?i)ssh\s*(\S+)@(\S+)").unwrap();
+        let entry = RealVaultApi::extract_ssh_entry(&cipher, &pattern).unwrap();
+        assert_eq!(entry.user, "user");
+        assert_eq!(entry.ip, "192.168.213.7");
+        assert_eq!(entry.password, "pass123");
+    }
+
+    #[test]
+    fn test_extract_ssh_entry_from_name_multiple_spaces() {
+        // Test with multiple spaces
+        let cipher = CipherResponse {
+            id: "1c".to_string(),
+            cipher_type: 1,
+            name: "ssh  user@192.168.213.7".to_string(),
+            notes: None,
+            login: Some(LoginData {
+                username: Some("user".to_string()),
+                password: Some("pass456".to_string()),
+                uris: None,
+            }),
+            collection_ids: None,
+            organization_id: None,
+            _other: HashMap::new(),
+        };
+
+        let pattern = Regex::new(r"(?i)ssh\s*(\S+)@(\S+)").unwrap();
+        let entry = RealVaultApi::extract_ssh_entry(&cipher, &pattern).unwrap();
+        assert_eq!(entry.user, "user");
+        assert_eq!(entry.ip, "192.168.213.7");
+        assert_eq!(entry.password, "pass456");
     }
 
     #[test]
@@ -1194,7 +1269,7 @@ mod tests {
             _other: HashMap::new(),
         };
 
-        let pattern = Regex::new(r"(?i)ssh\s+(\S+)@(\S+)").unwrap();
+        let pattern = Regex::new(r"(?i)ssh\s*(\S+)@(\S+)").unwrap();
         let entry = RealVaultApi::extract_ssh_entry(&cipher, &pattern).unwrap();
         assert_eq!(entry.user, "deploy");
         assert_eq!(entry.ip, "172.16.0.2");
@@ -1220,7 +1295,7 @@ mod tests {
             _other: HashMap::new(),
         };
 
-        let pattern = Regex::new(r"(?i)ssh\s+(\S+)@(\S+)").unwrap();
+        let pattern = Regex::new(r"(?i)ssh\s*(\S+)@(\S+)").unwrap();
         let entry = RealVaultApi::extract_ssh_entry(&cipher, &pattern).unwrap();
         assert_eq!(entry.user, "admin");
         assert_eq!(entry.ip, "192.168.1.10");
@@ -1228,35 +1303,145 @@ mod tests {
     }
 
     #[test]
-    fn test_expand_collection_ids_includes_descendants() {
-        let collections = vec![
-            CollectionResponse {
-                id: "base".to_string(),
-                name: "Base".to_string(),
-                organization_id: Some("org".to_string()),
-                parent_id: None,
+    fn test_extract_ssh_entry_no_match() {
+        // Test cipher that doesn't match SSH pattern
+        let cipher = CipherResponse {
+            id: "4".to_string(),
+            cipher_type: 1,
+            name: "Regular Website".to_string(),
+            notes: Some("Just a regular website login".to_string()),
+            login: Some(LoginData {
+                username: Some("user".to_string()),
+                password: Some("pass".to_string()),
+                uris: Some(vec![UriData {
+                    uri: Some("https://example.com".to_string()),
+                }]),
+            }),
+            collection_ids: None,
+            organization_id: None,
+            _other: HashMap::new(),
+        };
+
+        let pattern = Regex::new(r"(?i)ssh\s*(\S+)@(\S+)").unwrap();
+        let entry = RealVaultApi::extract_ssh_entry(&cipher, &pattern);
+        assert!(entry.is_none(), "Should not match non-SSH entries");
+    }
+
+    #[test]
+    fn test_extract_ssh_entry_prefers_name_over_notes() {
+        // Test that name field is checked first
+        let cipher = CipherResponse {
+            id: "5".to_string(),
+            cipher_type: 1,
+            name: "ssh root@10.0.0.1".to_string(),
+            notes: Some("ssh other@192.168.1.1".to_string()),
+            login: Some(LoginData {
+                username: Some("root".to_string()),
+                password: Some("pass".to_string()),
+                uris: None,
+            }),
+            collection_ids: None,
+            organization_id: None,
+            _other: HashMap::new(),
+        };
+
+        let pattern = Regex::new(r"(?i)ssh\s*(\S+)@(\S+)").unwrap();
+        let entry = RealVaultApi::extract_ssh_entry(&cipher, &pattern).unwrap();
+        // Should use the name field, not notes
+        assert_eq!(entry.user, "root");
+        assert_eq!(entry.ip, "10.0.0.1");
+    }
+
+    #[test]
+    fn test_parse_ssh_entries_full_flow() {
+        // Test the full parsing flow with multiple ciphers
+        let ciphers = vec![
+            CipherResponse {
+                id: "1".to_string(),
+                cipher_type: 1,
+                name: "ssh admin@192.168.1.1".to_string(),
+                notes: None,
+                login: Some(LoginData {
+                    username: Some("admin".to_string()),
+                    password: Some("pass1".to_string()),
+                    uris: None,
+                }),
+                collection_ids: None,
+                organization_id: None,
                 _other: HashMap::new(),
             },
-            CollectionResponse {
-                id: "child".to_string(),
-                name: "Child".to_string(),
-                organization_id: Some("org".to_string()),
-                parent_id: Some("base".to_string()),
+            CipherResponse {
+                id: "2".to_string(),
+                cipher_type: 1,
+                name: "ssh  user@192.168.213.7".to_string(), // Multiple spaces
+                notes: None,
+                login: Some(LoginData {
+                    username: Some("user".to_string()),
+                    password: Some("pass2".to_string()),
+                    uris: None,
+                }),
+                collection_ids: None,
+                organization_id: None,
                 _other: HashMap::new(),
             },
-            CollectionResponse {
-                id: "grandchild".to_string(),
-                name: "Grandchild".to_string(),
-                organization_id: Some("org".to_string()),
-                parent_id: Some("child".to_string()),
+            CipherResponse {
+                id: "3".to_string(),
+                cipher_type: 1,
+                name: "sshuser@10.0.0.1".to_string(), // No space
+                notes: None,
+                login: Some(LoginData {
+                    username: Some("user".to_string()),
+                    password: Some("pass3".to_string()),
+                    uris: None,
+                }),
+                collection_ids: None,
+                organization_id: None,
+                _other: HashMap::new(),
+            },
+            CipherResponse {
+                id: "4".to_string(),
+                cipher_type: 1,
+                name: "Regular Site".to_string(), // Not an SSH entry
+                notes: None,
+                login: Some(LoginData {
+                    username: Some("user".to_string()),
+                    password: Some("pass4".to_string()),
+                    uris: None,
+                }),
+                collection_ids: None,
+                organization_id: None,
                 _other: HashMap::new(),
             },
         ];
 
-        let expanded = RealVaultApi::expand_collection_ids(&collections, &vec!["base".to_string()]);
-        assert!(expanded.contains("base"));
-        assert!(expanded.contains("child"));
-        assert!(expanded.contains("grandchild"));
+        // Create a minimal RealVaultApi instance for testing
+        let config = crate::config::Config {
+            vault_url: "https://example.com".to_string(),
+            email: None,
+            ttl_minutes: None,
+            collection_ids: None,
+            organization_id: None,
+        };
+        let api = RealVaultApi::new(config);
+
+        let entries = api.parse_ssh_entries(ciphers).unwrap();
+
+        // Should extract 3 SSH entries (skip the regular site)
+        assert_eq!(entries.len(), 3);
+
+        // Check first entry
+        assert_eq!(entries[0].user, "admin");
+        assert_eq!(entries[0].ip, "192.168.1.1");
+        assert_eq!(entries[0].password, "pass1");
+
+        // Check second entry (multiple spaces)
+        assert_eq!(entries[1].user, "user");
+        assert_eq!(entries[1].ip, "192.168.213.7");
+        assert_eq!(entries[1].password, "pass2");
+
+        // Check third entry (no space)
+        assert_eq!(entries[2].user, "user");
+        assert_eq!(entries[2].ip, "10.0.0.1");
+        assert_eq!(entries[2].password, "pass3");
     }
 }
-

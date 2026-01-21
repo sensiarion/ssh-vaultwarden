@@ -14,16 +14,19 @@ impl MockVaultApi {
                 user: "admin".to_string(),
                 ip: "192.168.1.1".to_string(),
                 password: "admin123".to_string(),
+                notes: None,
             },
             SshEntry {
                 user: "root".to_string(),
                 ip: "10.0.0.1".to_string(),
                 password: "rootpass".to_string(),
+                notes: None,
             },
             SshEntry {
                 user: "deploy".to_string(),
                 ip: "172.16.0.1".to_string(),
                 password: "deploy456".to_string(),
+                notes: None,
             },
         ]
     }

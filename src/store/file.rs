@@ -124,11 +124,13 @@ mod tests {
                 user: "user1".to_string(),
                 ip: "1.1.1.1".to_string(),
                 password: "pass1".to_string(),
+                notes: None,
             },
             SshEntry {
                 user: "user2".to_string(),
                 ip: "2.2.2.2".to_string(),
                 password: "pass2".to_string(),
+                notes: None,
             },
         ];
 
@@ -168,6 +170,7 @@ mod tests {
                 user: "user1".to_string(),
                 ip: "1.1.1.1".to_string(),
                 password: "pass1".to_string(),
+                notes: None,
             },
         ];
         store.save_entries(&entries).unwrap();
