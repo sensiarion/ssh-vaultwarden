@@ -65,6 +65,7 @@ After running `sv init`, you'll get a config file at `~/.ssh-vaultvarden.toml`:
 ```toml
 vault_url = "https://vault.example.com"
 email = "your.email@example.com"
+store_api = "keyring"
 ttl_minutes = 60
 organization_id = "org-123"
 ```
@@ -76,13 +77,17 @@ You can also create the config file manually:
 ```toml
 vault_url = "https://yourinstance.com"
 email = "your.email@example.com" # optional, if not specified, will be required on sync command
+store_api = "keyring" # optional, "keyring" or "file" (can also be set via STORE_API env var)
 ttl_minutes = 60 # optional, TTL in minutes for auto-sync
 organization_id = "org-123" # optional, filters items by organization ID
 ```
 
 ## Storage (store backend)
 
-This tool caches synced SSH entries (including passwords). Choose where that cache is stored via `STORE_API`:
+This tool caches synced SSH entries (including passwords). Choose where that cache is stored via:
+
+- `STORE_API=file|keyring` (env var, **overrides config**)
+- `store_api = "file" | "keyring"` in `~/.ssh-vaultvarden.toml`
 
 - **Recommended (secure)**: `STORE_API=keyring`
     - Uses your OS keyring (macOS Keychain / Windows Credential Manager / Linux Secret Service).

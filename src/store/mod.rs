@@ -4,6 +4,18 @@ use crate::Result;
 pub mod file;
 pub mod keyring;
 
+fn store_api_from_env_or_config() -> Result<Option<String>> {
+    if let Ok(v) = std::env::var("STORE_API") {
+        return Ok(Some(v));
+    }
+
+    // Config is optional for store selection (e.g. `sv init` not run yet).
+    match crate::config::Config::load() {
+        Ok(cfg) => Ok(cfg.store_api),
+        Err(_) => Ok(None),
+    }
+}
+
 pub trait Store: Send + Sync {
     fn load_entries(&self) -> Result<Vec<SshEntry>>;
     fn save_entries(&self, entries: &[SshEntry]) -> Result<()>;
@@ -16,18 +28,18 @@ pub trait Store: Send + Sync {
 /// - `STORE_API=file` (default): store data in `~/.ssh-vaultvarden-secret.json`
 /// - `STORE_API=keyring`: store data in the OS keyring (Keychain / Credential Manager / Secret Service)
 pub fn store_from_env() -> Result<Box<dyn Store>> {
-    match std::env::var("STORE_API") {
-        Ok(v) if v == "file" => Ok(Box::new(file::FileStore::default()?)),
-        Ok(v) if v == "keyring" => {
+    match store_api_from_env_or_config()?.as_deref() {
+        Some("file") => Ok(Box::new(file::FileStore::default()?)),
+        Some("keyring") => {
             let store = keyring::KeyringStore::default();
             maybe_migrate_from_file_store(&store)?;
             Ok(Box::new(store))
         }
-        Ok(v) => Err(crate::Error::Store(format!(
-            "Invalid STORE_API value '{}'. Use 'file' or 'keyring'.",
+        Some(v) => Err(crate::Error::Store(format!(
+            "Invalid store backend '{}'. Use 'file' or 'keyring' (via STORE_API or config store_api).",
             v
         ))),
-        Err(_) => {
+        None => {
             let store = keyring::KeyringStore::default();
             maybe_migrate_from_file_store(&store)?;
             Ok(Box::new(store))

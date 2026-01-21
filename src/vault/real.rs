@@ -1471,6 +1471,7 @@ mod tests {
         let config = crate::config::Config {
             vault_url: "https://example.com".to_string(),
             email: None,
+            store_api: None,
             ttl_minutes: None,
             collection_ids: None,
             organization_id: None,

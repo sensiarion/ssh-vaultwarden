@@ -6,6 +6,10 @@ use std::path::PathBuf;
 pub struct Config {
     pub vault_url: String,
     pub email: Option<String>,
+    /// Store backend to use for cached synced data.
+    /// If not set, `STORE_API` env var (if present) or the default backend is used.
+    #[serde(default)]
+    pub store_api: Option<String>,
     /// TTL in minutes for auto-sync. If None, sync never expires.
     #[serde(default)]
     pub ttl_minutes: Option<u64>,
@@ -49,6 +53,7 @@ impl Config {
         Self {
             vault_url: "https://yourinstance.com".to_string(),
             email: None,
+            store_api: Some("keyring".to_string()),
             ttl_minutes: None,
             collection_ids: None,
             organization_id: None,
@@ -75,6 +80,7 @@ mod tests {
         let config = Config {
             vault_url: "https://test.example.com".to_string(),
             email: Some("testuser@example.com".to_string()),
+            store_api: Some("file".to_string()),
             ttl_minutes: None,
             collection_ids: Some(vec!["collection-1".to_string(), "collection-2".to_string()]),
             organization_id: Some("org-123".to_string()),
@@ -86,6 +92,7 @@ mod tests {
         let loaded: Config = toml::from_str(&fs::read_to_string(&config_file).unwrap()).unwrap();
         assert_eq!(loaded.vault_url, "https://test.example.com");
         assert_eq!(loaded.email, Some("testuser@example.com".to_string()));
+        assert_eq!(loaded.store_api, Some("file".to_string()));
         assert_eq!(
             loaded.collection_ids,
             Some(vec!["collection-1".to_string(), "collection-2".to_string()])

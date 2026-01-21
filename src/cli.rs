@@ -193,6 +193,7 @@ impl App {
         let config = Config {
             vault_url: vault_url.trim().to_string(),
             email,
+            store_api: None,
             ttl_minutes,
             collection_ids,
             organization_id,
