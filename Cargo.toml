@@ -22,7 +22,8 @@ thiserror = "1.0"
 inquire = "0.7"
 atty = "0.2"
 arboard = "3.3"
-reqwest = { version = "0.11", features = ["json", "blocking"] }
+# Use rustls to avoid OpenSSL (important for cross-compiling in CI).
+reqwest = { version = "0.11", default-features = false, features = ["json", "blocking", "rustls-tls-webpki-roots"] }
 regex = "1.10"
 uuid = { version = "1.10", features = ["v4"] }
 pbkdf2 = "0.12"
