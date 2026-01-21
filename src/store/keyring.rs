@@ -86,4 +86,3 @@ impl Store for KeyringStore {
         self.save_data(&data)
     }
 }
-

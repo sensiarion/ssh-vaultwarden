@@ -1,8 +1,9 @@
 use crate::config::Config;
 use crate::store::{store_from_env, Store};
+use crate::vault::SshEntry;
 use crate::vault::{mock::MockVaultApi, real::RealVaultApi, VaultApi};
 use crate::Result;
-use clap::{Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand};
 use inquire::{Password, Select, Text};
 use std::env;
 use std::io::{self, BufRead};
@@ -19,9 +20,23 @@ pub struct Cli {
     /// Connect to SSH server (short for 'connect')
     #[arg(short = 'c', long = "connect")]
     pub connect_pattern: Option<String>,
+
+    /// Extra arguments passed to the underlying `ssh` command as-is.
+    ///
+    /// Examples:
+    /// - `sv connect admin --opt -p 2222 -v`
+    /// - `sv -c admin --opt -o StrictHostKeyChecking=no`
+    #[arg(
+        long = "opt",
+        global = true,
+        allow_hyphen_values = true,
+        num_args = 1..,
+        action = ArgAction::Append
+    )]
+    pub ssh_opts: Vec<String>,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Debug)]
 pub enum Commands {
     /// Initialize configuration file
     Init {
@@ -39,6 +54,11 @@ pub enum Commands {
     },
     /// Connect to SSH server
     Connect {
+        /// Pattern to search for (matches user or IP)
+        pattern: String,
+    },
+    /// Copy password of matching SSH entry to clipboard (does not run ssh)
+    Pass {
         /// Pattern to search for (matches user or IP)
         pattern: String,
     },
@@ -76,13 +96,18 @@ impl App {
         Ok(Self { vault, store })
     }
 
-    pub fn run(&self, cmd: Option<Commands>, connect_pattern: Option<String>) -> Result<()> {
+    pub fn run(
+        &self,
+        cmd: Option<Commands>,
+        connect_pattern: Option<String>,
+        ssh_opts: Vec<String>,
+    ) -> Result<()> {
         // Handle -c/--connect flag (takes precedence)
         if let Some(pattern) = connect_pattern {
             if cmd.is_some() {
                 eprintln!("Warning: --connect flag conflicts with subcommand. Using --connect.");
             }
-            return self.handle_connect(&pattern);
+            return self.handle_connect(&pattern, &ssh_opts);
         }
 
         // Handle subcommands
@@ -92,7 +117,8 @@ impl App {
                 non_interactive,
             }) => self.handle_init(overwrite, non_interactive),
             Some(Commands::Search { pattern }) => self.handle_search(&pattern),
-            Some(Commands::Connect { pattern }) => self.handle_connect(&pattern),
+            Some(Commands::Connect { pattern }) => self.handle_connect(&pattern, &ssh_opts),
+            Some(Commands::Pass { pattern }) => self.handle_pass(&pattern),
             Some(Commands::Sync) => self.handle_sync(),
             None => {
                 eprintln!("No command specified. Use 'sv --help' for usage information.");
@@ -289,7 +315,12 @@ impl App {
 
         println!("Found {} matching entries:", matches.len());
         for entry in &matches {
-            println!("  ssh {}@{}{}", entry.user, entry.ip, self._display_notes(&entry.notes));
+            println!(
+                "  ssh {}@{}{}",
+                entry.user,
+                entry.ip,
+                self._display_notes(&entry.notes)
+            );
         }
 
         Ok(())
@@ -302,7 +333,7 @@ impl App {
             .unwrap_or_default()
     }
 
-    fn handle_connect(&self, pattern: &str) -> Result<()> {
+    fn resolve_entry_by_pattern(&self, pattern: &str) -> Result<Option<SshEntry>> {
         // Check if sync is needed
         self.check_and_prompt_sync()?;
 
@@ -311,7 +342,7 @@ impl App {
 
         if entries.is_empty() {
             println!("Store is empty. Run 'sv sync' to fetch entries from vault.");
-            return Ok(());
+            return Ok(None);
         }
 
         // Filter by pattern
@@ -322,32 +353,36 @@ impl App {
 
         if matches.is_empty() {
             println!("No entries found matching pattern: {}", pattern);
-            return Ok(());
+            return Ok(None);
         }
 
         // Select entry if multiple matches
         let entry = if matches.len() == 1 {
-            &matches[0]
+            matches[0].clone()
         } else {
             // Multiple matches - let user choose (or use first in non-interactive mode)
             if !atty::is(atty::Stream::Stdout) {
                 // Non-interactive: use first match
                 println!("Found {} matching entries, using first:", matches.len());
                 for (i, e) in matches.iter().enumerate() {
-                    println!("  {}. {}@{}{}", i + 1, e.user, e.ip, self._display_notes(&e.notes));
+                    println!(
+                        "  {}. {}@{}{}",
+                        i + 1,
+                        e.user,
+                        e.ip,
+                        self._display_notes(&e.notes)
+                    );
                 }
-                &matches[0]
+                matches[0].clone()
             } else {
                 // Interactive: let user choose
                 println!("Found {} matching entries:", matches.len());
                 let options: Vec<String> = matches
                     .iter()
-                    .map(|e| {
-                        format!("{}@{}{}", e.user, e.ip, self._display_notes(&e.notes))
-                    })
+                    .map(|e| format!("{}@{}{}", e.user, e.ip, self._display_notes(&e.notes)))
                     .collect();
 
-                let selection = Select::new("Select entry to connect:", options)
+                let selection = Select::new("Select entry:", options)
                     .prompt()
                     .map_err(|e| crate::Error::Config(format!("Failed to select entry: {}", e)))?;
 
@@ -356,8 +391,33 @@ impl App {
                     .find(|e| {
                         format!("{}@{}{}", e.user, e.ip, self._display_notes(&e.notes)) == selection
                     })
+                    .cloned()
                     .ok_or_else(|| crate::Error::Config("Selected entry not found".to_string()))?
             }
+        };
+
+        Ok(Some(entry))
+    }
+
+    fn handle_pass(&self, pattern: &str) -> Result<()> {
+        let Some(entry) = self.resolve_entry_by_pattern(pattern)? else {
+            return Ok(());
+        };
+
+        self.copy_to_clipboard(&entry.password)?;
+        println!("Password copied to clipboard!");
+        println!(
+            "Entry: {}@{}{}",
+            entry.user,
+            entry.ip,
+            self._display_notes(&entry.notes)
+        );
+        Ok(())
+    }
+
+    fn handle_connect(&self, pattern: &str, ssh_opts: &[String]) -> Result<()> {
+        let Some(entry) = self.resolve_entry_by_pattern(pattern)? else {
+            return Ok(());
         };
 
         // Copy password to clipboard
@@ -372,10 +432,12 @@ impl App {
 
         // Execute the SSH command
         // Note: This will block until SSH session ends
-        match Command::new("ssh")
-            .arg(format!("{}@{}", entry.user, entry.ip))
-            .status()
-        {
+        let mut ssh = Command::new("ssh");
+        // ssh options must come before the destination (user@host)
+        ssh.args(ssh_opts)
+            .arg(format!("{}@{}", entry.user, entry.ip));
+
+        match ssh.status() {
             Ok(status) => {
                 if !status.success() {
                     eprintln!(
@@ -387,7 +449,16 @@ impl App {
             Err(e) => {
                 // If SSH is not available or command fails, just print the command
                 eprintln!("Warning: Could not execute SSH command: {}", e);
-                eprintln!("You can manually run: ssh {}@{}", entry.user, entry.ip);
+                if ssh_opts.is_empty() {
+                    eprintln!("You can manually run: ssh {}@{}", entry.user, entry.ip);
+                } else {
+                    eprintln!(
+                        "You can manually run: ssh {} {}@{}",
+                        ssh_opts.join(" "),
+                        entry.user,
+                        entry.ip
+                    );
+                }
                 eprintln!("Password is already in your clipboard.");
             }
         }
@@ -582,5 +653,40 @@ mod tests {
         let result = app.handle_search("admin");
         // This should succeed but report empty store
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn cli_parses_opt_for_connect_subcommand() {
+        let cli =
+            Cli::try_parse_from(["sv", "connect", "admin", "--opt", "-p", "2222", "-v"]).unwrap();
+
+        match cli.command {
+            Some(Commands::Connect { pattern }) => assert_eq!(pattern, "admin"),
+            other => panic!("expected Connect subcommand, got: {:?}", other),
+        }
+        assert_eq!(cli.connect_pattern, None);
+        assert_eq!(cli.ssh_opts, vec!["-p", "2222", "-v"]);
+    }
+
+    #[test]
+    fn cli_parses_opt_for_connect_short_flag() {
+        let cli =
+            Cli::try_parse_from(["sv", "-c", "admin", "--opt", "-o", "BatchMode=yes"]).unwrap();
+
+        assert_eq!(cli.connect_pattern, Some("admin".to_string()));
+        assert!(cli.command.is_none());
+        assert_eq!(cli.ssh_opts, vec!["-o", "BatchMode=yes"]);
+    }
+
+    #[test]
+    fn cli_parses_pass_subcommand() {
+        let cli = Cli::try_parse_from(["sv", "pass", "admin"]).unwrap();
+
+        match cli.command {
+            Some(Commands::Pass { pattern }) => assert_eq!(pattern, "admin"),
+            other => panic!("expected Pass subcommand, got: {:?}", other),
+        }
+        assert_eq!(cli.connect_pattern, None);
+        assert!(cli.ssh_opts.is_empty());
     }
 }

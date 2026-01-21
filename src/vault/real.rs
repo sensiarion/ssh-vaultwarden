@@ -53,7 +53,6 @@ struct CollectionResponse {
     _other: HashMap<String, serde_json::Value>,
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SyncCache {
     ciphers: Vec<CipherResponse>,
@@ -128,8 +127,6 @@ impl RealVaultApi {
     fn cache_exists() -> bool {
         Self::cache_path().is_file()
     }
-
-
 
     #[cfg(feature = "debug")]
     fn load_cache() -> Result<Option<SyncCache>> {
@@ -1087,18 +1084,20 @@ impl RealVaultApi {
             .cloned()
             .unwrap_or_default();
 
-        // Try name first, then notes, then URI(s).
-        let mut candidates: Vec<(&str, &str)> = Vec::new();
-        candidates.push(("name", cipher.name.as_str()));
-        if let Some(ref notes) = cipher.notes {
-            candidates.push(("notes", notes.as_str()));
+        // Prefer matching in this order:
+        // - cipher.name (most explicit / intended)
+        // - cipher.notes (many users keep SSH command there)
+        // - login.uris[].uri (Vaultwarden/Bitwarden URI field)
+        let mut candidates: Vec<(&'static str, &str)> = vec![("name", cipher.name.as_str())];
+
+        if let Some(notes) = cipher.notes.as_deref() {
+            candidates.push(("notes", notes));
         }
-        if let Some(ref login) = cipher.login {
-            if let Some(ref uris) = login.uris {
-                for uri in uris {
-                    if let Some(ref uri_value) = uri.uri {
-                        candidates.push(("uri", uri_value.as_str()));
-                    }
+
+        if let Some(login) = cipher.login.as_ref() {
+            if let Some(uris) = login.uris.as_ref() {
+                for uri in uris.iter().filter_map(|u| u.uri.as_deref()) {
+                    candidates.push(("uri", uri));
                 }
             }
         }

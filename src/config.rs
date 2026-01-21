@@ -27,7 +27,9 @@ impl Config {
     pub fn load() -> Result<Self> {
         let path = Self::config_path()?;
         if !path.exists() {
-            return Err(Error::Config("Config file not found. Run 'sv init' first.".to_string()));
+            return Err(Error::Config(
+                "Config file not found. Run 'sv init' first.".to_string(),
+            ));
         }
 
         let content = std::fs::read_to_string(&path)?;
@@ -61,14 +63,14 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
     use std::fs;
+    use tempfile::TempDir;
 
     #[test]
     fn test_config_save_and_load() {
         let temp_dir = TempDir::new().unwrap();
         let config_file = temp_dir.path().join(".ssh-vaultvarden.toml");
-        
+
         // Mock the home directory by using temp dir
         let config = Config {
             vault_url: "https://test.example.com".to_string(),
@@ -98,4 +100,3 @@ mod tests {
         assert_eq!(config.email, None);
     }
 }
-

@@ -33,11 +33,19 @@ hkdf = "0.12"
 rsa = { version = "0.9", features = ["sha1", "sha2"] }
 pkcs8 = "0.10"
 sha1 = "0.10"
-keyring = "3.6.3"
 
 [dev-dependencies]
 assert_cmd = "2.0"
 tempfile = "3.10"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3.6.3", default-features = false, features = ["apple-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3.6.3", default-features = false, features = ["windows-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3.6.3", default-features = false, features = ["linux-native-sync-persistent", "crypto-rust"] }
 
 [features]
 # Debug-only features. Not enabled by default.

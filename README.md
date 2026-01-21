@@ -3,13 +3,15 @@
 CLI tool to ease your work with ssh configs, storing in vaultvarden/bitwarden.
 
 To get started: run `sv init`, then `STORE_API=keyring sv sync`, and finally search/connect via `sv search <pattern>` /
-`sv -c <pattern>`.
+`sv -c <pattern>` (or copy only the password via `sv pass <pattern>`).
 Example:
 
 ```bash
 sv init
 STORE_API=keyring sv sync
 sv search admin
+sv connect admin --opt -p 2222 -v
+sv pass admin
 ```
 
 Example output:
@@ -86,7 +88,7 @@ This tool caches synced SSH entries (including passwords). Choose where that cac
     - Uses your OS keyring (macOS Keychain / Windows Credential Manager / Linux Secret Service).
     - Linux note: you typically need a Secret Service provider (e.g. GNOME Keyring / KWallet) running for keyring access
       to work.
-- **Insecure fallback**: `STORE_API=file` (default)
+- **Insecure fallback**: `STORE_API=file`
     - Writes plaintext JSON to `~/.ssh-vaultvarden-secret.json`.
 
 Example (secure keyring store):
@@ -101,7 +103,10 @@ sv search admin
 - `sv init` - Creates base config interactively
 - `sv sync` - Syncs SSH entries from vault
 - `sv search <pattern>` - Search for SSH entries matching pattern
-- `sv connect <pattern>` - Connect to SSH entry matching pattern
+- `sv connect <pattern>` - Connect to SSH entry matching pattern and copy ssh password to clipboard
+    - Pass extra ssh args with `--opt`, e.g. `sv connect admin --opt -p 2222 -o BatchMode=yes`
+    - also can be used as `sv -c` shortcut
+- `sv pass <pattern>` - Copy password of matching SSH entry to clipboard (does not run ssh)
 
 ## Features
 
@@ -116,9 +121,11 @@ sv search admin
     - executes ssh command if founds any
     - pastes password in buffer
     - friendly messages
-- [ ] auto completion support
-- [ ] caching loaded configs in system keyring
+- [ ] ~~auto completion support~~
+- [x] caching loaded configs in system keyring
 - [ ] caching prelogin data, to prevent full relogin on sync (it causes 429 error)
 - [ ] custom search pattern (specify your own, not just `ssh <user>@<ip>`)
-- [ ] provide additional args to ssh
-- [ ] pass command with same logic with connect, but just insert password in buffer
+- [x] provide additional args to ssh (`--opt`)
+- [ ] fix opt parsing
+- [x] pass command with same logic with connect, but just insert password in buffer
+- [ ] complete readme (with usage and developing blocks, talking about env vars and debug)

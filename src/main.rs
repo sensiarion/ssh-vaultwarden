@@ -9,7 +9,7 @@ fn main() {
         std::process::exit(1);
     });
 
-    if let Err(e) = app.run(cli.command, cli.connect_pattern) {
+    if let Err(e) = app.run(cli.command, cli.connect_pattern, cli.ssh_opts) {
         eprintln!("Error: {}", e);
         std::process::exit(1);
     }

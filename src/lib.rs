@@ -5,4 +5,3 @@ pub mod store;
 pub mod vault;
 
 pub use error::{Error, Result};
-

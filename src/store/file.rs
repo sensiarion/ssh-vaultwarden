@@ -1,6 +1,6 @@
-use crate::{Error, Result};
 use crate::store::Store;
 use crate::vault::SshEntry;
+use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -58,12 +58,12 @@ impl Store for FileStore {
                 sync_timestamp: None,
             }
         };
-        
+
         data.entries = entries.to_vec();
         // Note: sync_timestamp is updated separately via set_sync_timestamp
         let content = serde_json::to_string_pretty(&data)
             .map_err(|e| Error::Store(format!("Failed to serialize store: {}", e)))?;
-        
+
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -95,11 +95,11 @@ impl Store for FileStore {
                 sync_timestamp: None,
             }
         };
-        
+
         data.sync_timestamp = Some(timestamp);
         let content = serde_json::to_string_pretty(&data)
             .map_err(|e| Error::Store(format!("Failed to serialize store: {}", e)))?;
-        
+
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -165,16 +165,13 @@ mod tests {
         assert_eq!(store.get_sync_timestamp().unwrap(), Some(1234567890));
 
         // Save entries should preserve timestamp
-        let entries = vec![
-            SshEntry {
-                user: "user1".to_string(),
-                ip: "1.1.1.1".to_string(),
-                password: "pass1".to_string(),
-                notes: None,
-            },
-        ];
+        let entries = vec![SshEntry {
+            user: "user1".to_string(),
+            ip: "1.1.1.1".to_string(),
+            password: "pass1".to_string(),
+            notes: None,
+        }];
         store.save_entries(&entries).unwrap();
         assert_eq!(store.get_sync_timestamp().unwrap(), Some(1234567890));
     }
 }
-

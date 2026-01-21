@@ -1,5 +1,5 @@
-use crate::Result;
 use crate::vault::{SshEntry, VaultApi};
+use crate::Result;
 
 pub struct MockVaultApi;
 
@@ -61,17 +61,16 @@ mod tests {
     #[test]
     fn test_mock_vault_search() {
         let mut vault = MockVaultApi::new();
-        
+
         let results = vault.search("admin").unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].user, "admin");
-        
+
         let results = vault.search("192").unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].ip, "192.168.1.1");
-        
+
         let results = vault.search("").unwrap();
         assert_eq!(results.len(), 3);
     }
 }
-
